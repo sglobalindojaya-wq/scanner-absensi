@@ -1,0 +1,227 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scanner Absensi - Globalindo Jaya</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      background: #f1f3f5;
+      text-align: center;
+    }
+
+    .container {
+      max-width: 500px;
+      margin: 20px auto;
+      padding: 24px;
+      background: white;
+      border-radius: 16px;
+    }
+
+    h2 { color: #b5121b; }
+
+    #reader {
+      width: 100%;
+      margin: 20px auto;
+    }
+
+    #status {
+      padding: 15px;
+      border-radius: 10px;
+      white-space: pre-line;
+      background: #eee;
+      margin: 15px 0;
+    }
+
+    .success { background: #d1fae5 !important; color: #065f46; }
+    .error { background: #fee2e2 !important; color: #991b1b; }
+    .loading { background: #e5e7eb !important; color: #333; }
+
+    button {
+      width: 100%;
+      padding: 16px;
+      border: 0;
+      border-radius: 10px;
+      background: #b5121b;
+      color: white;
+      font-size: 16px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h2>ABSENSI PABRIK</h2>
+    <p>PT SHARK GLOBALINDO JAYA</p>
+
+    <div id="reader"></div>
+
+    <div id="status" class="loading">
+      Scanner siap diaktifkan.
+    </div>
+
+    <button id="startButton" onclick="startScanner()">
+      MULAI SCANNER
+    </button>
+  </div>
+
+  <script>
+    const SCRIPT_URL =
+      'https://script.google.com/macros/s/AKfycbzJFp_1jfIMoVH7Eqs9ics4aAARlWeBtMH61RL-MsDG4G80iUv6uHEZ5K5JU4Ni6ofq/exec';
+
+    const statusBox = document.getElementById('status');
+    const startButton = document.getElementById('startButton');
+
+    let scanner = null;
+    let isProcessing = false;
+    let lastScanTime = 0;
+
+    function showMessage(message, type) {
+      statusBox.className = type;
+      statusBox.textContent = message;
+    }
+
+    function detectDevice() {
+      const ua = navigator.userAgent;
+
+      if (/iPad/i.test(ua)) return 'TABLET';
+      if (/Android/i.test(ua) && !/Mobile/i.test(ua)) return 'TABLET';
+      if (/Mobile|iPhone|iPod/i.test(ua)) return 'HP';
+
+      return 'KOMPUTER';
+    }
+
+    function extractToken(decodedText) {
+      try {
+        return new URL(decodedText).searchParams.get('token') || '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+    function sendAttendance(token) {
+      const callbackName = 'attendanceCallback';
+
+      window[callbackName] = function(response) {
+        delete window[callbackName];
+
+        if (response.success) {
+          showMessage(
+            'ABSENSI BERHASIL!\n\n' +
+            'Nama: ' + response.name + '\n' +
+            'Departemen: ' + response.department + '\n' +
+            'Aktivitas: ' + response.activity + '\n' +
+            'Tanggal: ' + response.date + '\n' +
+            'Jam: ' + response.time,
+            'success'
+          );
+        } else {
+          showMessage(
+            'ABSENSI GAGAL\n' + response.message,
+            'error'
+          );
+        }
+
+        setTimeout(function() {
+          isProcessing = false;
+          showMessage(
+            'SCANNER SIAP\nSilakan pindai QR berikutnya.',
+            'loading'
+          );
+        }, 3000);
+      };
+
+      const script = document.createElement('script');
+
+      const params = new URLSearchParams({
+        action: 'scan',
+        token: token,
+        device: detectDevice(),
+        callback: callbackName
+      });
+
+      script.src = SCRIPT_URL + '?' + params.toString();
+
+      script.onerror = function() {
+        delete window[callbackName];
+        script.remove();
+
+        showMessage(
+          'GAGAL MENGHUBUNGI SERVER ABSENSI.',
+          'error'
+        );
+
+        setTimeout(function() {
+          isProcessing = false;
+        }, 3000);
+      };
+
+      script.onload = function() {
+        script.remove();
+      };
+
+      document.body.appendChild(script);
+    }
+
+    function onScanSuccess(decodedText) {
+      const now = Date.now();
+
+      if (isProcessing || now - lastScanTime < 2000) return;
+
+      const token = extractToken(decodedText);
+
+      if (!token) {
+        lastScanTime = now;
+        showMessage('QR TIDAK VALID.', 'error');
+        return;
+      }
+
+      isProcessing = true;
+      lastScanTime = now;
+
+      showMessage('MEMPROSES ABSENSI...', 'loading');
+
+      sendAttendance(token);
+    }
+
+    async function startScanner() {
+      startButton.disabled = true;
+
+      try {
+        if (!scanner) {
+          scanner = new Html5Qrcode('reader');
+        }
+
+        await scanner.start(
+          { facingMode: 'environment' },
+          {
+            fps: 10,
+            qrbox: { width: 250, height: 250 }
+          },
+          onScanSuccess
+        );
+
+        showMessage('KAMERA AKTIF. ARAHKAN KE QR KARYAWAN.', 'success');
+        startButton.style.display = 'none';
+
+      } catch (error) {
+        showMessage(
+          'KAMERA GAGAL DIAKTIFKAN.\n' + error.message,
+          'error'
+        );
+
+        startButton.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
