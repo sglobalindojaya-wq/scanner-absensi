@@ -175,6 +175,27 @@
   script.src = SCRIPT_URL + '?' + params.toString();
 
   script.onerror = function() {
+  if (finished) return;
+
+  finished = true;
+  clearTimeout(timeout);
+  delete window[callbackName];
+  script.remove();
+
+  showMessage(
+    'ERROR MEMUAT SERVER!\n' +
+    'URL: ' + SCRIPT_URL + '\n' +
+    'Internet: ' + (navigator.onLine ? 'TERHUBUNG' : 'TERPUTUS'),
+    'error'
+  );
+
+  setTimeout(function() {
+    isProcessing = false;
+  }, 3000);
+};
+
+script.onload = function() {
+  setTimeout(function() {
     if (finished) return;
 
     finished = true;
@@ -182,13 +203,14 @@
     delete window[callbackName];
     script.remove();
 
-    showMessage('GAGAL MEMUAT SCRIPT DARI SERVER.', 'error');
+    showMessage(
+      'SCRIPT TERMUAT, TETAPI CALLBACK TIDAK DITERIMA.',
+      'error'
+    );
 
-    setTimeout(function() {
-      isProcessing = false;
-    }, 3000);
-  };
-
+    isProcessing = false;
+  }, 1000);
+};
   document.body.appendChild(script);
 }
 
