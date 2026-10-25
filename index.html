@@ -76,7 +76,7 @@
 
   <script>
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbxOiTjOafZgGCeeMJn-iNa7nWObTjdapBbzAf9VGXYLEjHdgFLOKwlQCI419rCTwTWT/exec';
+      'https://script.google.com/macros/s/AKfycbxWaqoFURjKzkdExjen9uWHLQRXrFc3ibdyfCx68MD_VTOh4nsrwpYdTTqq31jNwtE6/exec';
 
     const statusBox = document.getElementById('status');
     const startButton = document.getElementById('startButton');
@@ -202,7 +202,7 @@
         }
 
         await scanner.start(
-          { facingMode: 'environment' },
+          { facingMode: 'user' },
           {
             fps: 10,
             qrbox: { width: 250, height: 250 }
