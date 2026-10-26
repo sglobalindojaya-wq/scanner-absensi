@@ -277,8 +277,8 @@
         return;
       }
 
-      const callbackName =
-        'attendanceCallback_' + Date.now();
+      // Harus sama persis dengan callback yang diizinkan oleh doGet(e) di Kode.gs.
+      const callbackName = 'attendanceCallback';
 
       const script = document.createElement('script');
       let finished = false;
