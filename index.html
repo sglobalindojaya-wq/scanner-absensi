@@ -92,23 +92,30 @@
 <body>
   <div class="container">
 
-    <h2>ABSENSI PABRIK</h2>
-    <p>PT SHARK GLOBALINDO JAYA</p>
+  <h2>ABSENSI PABRIK</h2>
+  <p>PT SHARK GLOBALINDO JAYA</p>
 
-    <div id="googleLogin"></div>
-    <p id="accountInfo">Silakan login dengan akun resmi.</p>
+  <div id="googleLogin"></div>
+  <p id="accountInfo">Silakan login dengan akun resmi.</p>
 
-    <div id="reader"></div>
+  <!-- SCANNER QR KAMERA BELAKANG -->
+  <div id="reader"></div>
 
-    <div id="status" class="loading">
-      Menunggu login Google.
-    </div>
+  <!-- KAMERA DEPAN UNTUK FOTO WAJAH -->
+  <video id="faceCamera" autoplay playsinline muted
+         style="display:none;"></video>
 
-    <button id="startButton" onclick="startScanner()" disabled>
-      MULAI SCANNER
-    </button>
+  <canvas id="faceCanvas" style="display:none;"></canvas>
 
+  <div id="status" class="loading">
+    Menunggu login Google.
   </div>
+
+  <button id="startButton" onclick="startScanner()" disabled>
+    MULAI SCANNER
+  </button>
+
+</div>
 
   <script>
     // =====================================
@@ -116,7 +123,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbzkWuBeXtBNmqbB9WCFLs0PVuDES0FQbMLpxafP-IQ_iF7Nz6HUulfzpjERXiRglcTK/exec';
+      'https://script.google.com/macros/s/AKfycbx7tkSwuut5OuEMKHQ3u2czEanKLEwDxVO9wkW_guW2ntXq1XdYPePiDaPzuZrtRzVf/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -131,10 +138,91 @@
     const startButton = document.getElementById('startButton');
     const accountInfo = document.getElementById('accountInfo');
 
+    const faceCamera = document.getElementById('faceCamera');
+    const faceCanvas = document.getElementById('faceCanvas');
+
     let scanner = null;
     let isProcessing = false;
     let lastScanTime = 0;
     let googleIdToken = '';
+    
+    let faceStream = null;
+    let isCapturingFace = false;
+
+    async function captureFacePhoto() {
+        if (isCapturingFace) {
+          throw new Error('Kamera sedang mengambil foto.');
+        }
+      
+        isCapturingFace = true;
+      
+        const video = document.getElementById('faceCamera');
+        const canvas = document.getElementById('faceCanvas');
+      
+        try {
+          faceStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: 'user' },
+              width: { ideal: 640 },
+              height: { ideal: 480 }
+            },
+            audio: false
+          });
+      
+          video.srcObject = faceStream;
+      
+          await new Promise((resolve, reject) => {
+            video.onloadedmetadata = resolve;
+            video.onerror = reject;
+          });
+      
+          await video.play();
+      
+          const context = canvas.getContext('2d');
+      
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+      
+          context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+          );
+      
+          return canvas.toDataURL('image/jpeg', 0.7);
+      
+        } finally {
+          if (faceStream) {
+            faceStream.getTracks().forEach(track => track.stop());
+            faceStream = null;
+          }
+      
+          video.srcObject = null;
+          isCapturingFace = false;
+        }
+      }
+
+    async function uploadFacePhoto(imageData, requestId, token) {
+      if (!imageData || !requestId || !token) {
+        throw new Error('Data foto tidak lengkap.');
+      }
+    
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8'
+        },
+        body: JSON.stringify({
+          action: 'uploadPhoto',
+          requestId: requestId,
+          token: token,
+          imageData: imageData
+        })
+      });
+    }
 
     // =====================================
     // TAMPILAN STATUS
@@ -327,12 +415,41 @@
     // KIRIM ABSENSI
     // =====================================
 
-    function sendAttendance(token) {
+    async function sendAttendance(token) {
       if (!googleIdToken) {
         showMessage('Silakan login Google terlebih dahulu.', 'error');
         isProcessing = false;
         return;
       }
+
+            // Buat ID unik untuk menghubungkan foto dengan absensi.
+            const requestId = (
+              window.crypto && crypto.randomUUID
+                ? crypto.randomUUID()
+                : Date.now() + '_' + Math.random().toString(36).slice(2)
+            );
+      
+            // Ambil foto wajah menggunakan kamera depan.
+            try {
+              showMessage('MENGAMBIL FOTO WAJAH...', 'loading');
+      
+              const imageData = await captureFacePhoto();
+      
+              showMessage('MENGUNGGAH FOTO...', 'loading');
+      
+              await uploadFacePhoto(imageData, requestId, token);
+      
+            } catch (error) {
+              console.error('Gagal mengambil atau mengunggah foto:', error);
+      
+              showMessage(
+                'FOTO GAGAL DIPROSES!\n' + error.message,
+                'error'
+              );
+      
+              resetScanner();
+              return;
+            }
 
       // Harus sama persis dengan callback yang diizinkan oleh doGet(e) di Kode.gs.
       const callbackName = 'attendanceCallback';
@@ -399,6 +516,7 @@
         token: token,
         device: detectDevice(),
         id_token: googleIdToken,
+        requestId: requestId,
         callback: callbackName
       });
 
