@@ -502,10 +502,17 @@ async function uploadFacePhoto(imageData, requestId, token) {
           await uploadFacePhoto(imageData, requestId, token);
         
         } catch (error) {
-      
-              resetScanner();
-              return;
-            }
+          showMessage(
+            'GAGAL MENGAMBIL / MENGIRIM FOTO!\n' +
+            (error.message || error),
+            'error'
+          );
+        
+          console.error('ERROR FOTO:', error);
+          isProcessing = false;
+        
+          return;
+        }
 
       // Harus sama persis dengan callback yang diizinkan oleh doGet(e) di Kode.gs.
       const callbackName = 'attendanceCallback';
