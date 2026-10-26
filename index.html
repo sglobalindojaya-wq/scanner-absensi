@@ -123,7 +123,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbx7tkSwuut5OuEMKHQ3u2czEanKLEwDxVO9wkW_guW2ntXq1XdYPePiDaPzuZrtRzVf/exec';
+      'https://script.google.com/macros/s/AKfycbwTmUpnYtSPq6Cq0FiTWvHwq1Z0yDCOB7SycEp53lYKZC1vQ3Y1-OSCih88W9gOphN_/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -398,15 +398,27 @@
     // RESET SCANNER
     // =====================================
 
-    function resetScanner() {
-      setTimeout(function() {
+    async function resetScanner() {
+      setTimeout(async function() {
         isProcessing = false;
-
+    
         if (googleIdToken) {
-          showMessage(
-            'KAMERA AKTIF\nSilakan pindai QR berikutnya.',
-            'loading'
-          );
+          try {
+            if (!scanner || !scanner.isScanning) {
+              await startScanner();
+            }
+    
+            showMessage(
+              'KAMERA AKTIF\nSilakan pindai QR berikutnya.',
+              'success'
+            );
+    
+          } catch (error) {
+            showMessage(
+              'KAMERA GAGAL DIAKTIFKAN.\n' + error.message,
+              'error'
+            );
+          }
         }
       }, 1500);
     }
@@ -431,21 +443,23 @@
       
             // Ambil foto wajah menggunakan kamera depan.
             try {
-              showMessage('MENGAMBIL FOTO WAJAH...', 'loading');
-      
-              const imageData = await captureFacePhoto();
-      
-              showMessage('MENGUNGGAH FOTO...', 'loading');
-      
-              await uploadFacePhoto(imageData, requestId, token);
-      
-            } catch (error) {
-              console.error('Gagal mengambil atau mengunggah foto:', error);
-      
-              showMessage(
-                'FOTO GAGAL DIPROSES!\n' + error.message,
-                'error'
-              );
+          showMessage('MENGHENTIKAN KAMERA SCANNER...', 'loading');
+        
+          // Hentikan kamera belakang sementara.
+          if (scanner && scanner.isScanning) {
+            await scanner.stop();
+          }
+        
+          showMessage('MENGAMBIL FOTO WAJAH...', 'loading');
+        
+          // Aktifkan kamera depan dan ambil foto.
+          const imageData = await captureFacePhoto();
+        
+          showMessage('MENGUNGGAH FOTO...', 'loading');
+        
+          await uploadFacePhoto(imageData, requestId, token);
+        
+        } catch (error) {
       
               resetScanner();
               return;
