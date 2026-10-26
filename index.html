@@ -1,4 +1,4 @@
-
+```html
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -7,11 +7,10 @@
   <title>Scanner Absensi - Globalindo Jaya</title>
 
   <script src="https://unpkg.com/html5-qrcode"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -29,9 +28,7 @@
       border-radius: 16px;
     }
 
-    h2 {
-      color: #b5121b;
-    }
+    h2 { color: #b5121b; }
 
     #reader {
       width: 100%;
@@ -76,50 +73,69 @@
 
     button:disabled {
       opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    #googleLogin {
+      display: flex;
+      justify-content: center;
+      margin: 20px 0;
+    }
+
+    #accountInfo {
+      font-size: 13px;
+      color: #555;
+      overflow-wrap: anywhere;
     }
   </style>
 </head>
 
 <body>
-
   <div class="container">
 
     <h2>ABSENSI PABRIK</h2>
     <p>PT SHARK GLOBALINDO JAYA</p>
 
+    <div id="googleLogin"></div>
+    <p id="accountInfo">Silakan login dengan akun resmi.</p>
+
     <div id="reader"></div>
 
     <div id="status" class="loading">
-      Scanner siap diaktifkan.
+      Menunggu login Google.
     </div>
 
-    <button id="startButton" onclick="startScanner()">
+    <button id="startButton" onclick="startScanner()" disabled>
       MULAI SCANNER
     </button>
 
   </div>
 
   <script>
-
     // =====================================
-    // KONFIGURASI SERVER APPS SCRIPT
+    // KONFIGURASI
     // =====================================
 
     const SCRIPT_URL =
       'https://script.google.com/macros/s/AKfycby7Sm60EH518zswjitjfBF-cumPtsk66oOnGbhAF1nu4Xy8QTKP0cFc6Ebq8LL7HHZJ/exec';
 
+    const GOOGLE_CLIENT_ID =
+      '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
+
+    const OFFICIAL_EMAIL = 'sglobalindojaya@gmail.com';
 
     // =====================================
-    // VARIABEL GLOBAL
+    // VARIABEL
     // =====================================
 
     const statusBox = document.getElementById('status');
     const startButton = document.getElementById('startButton');
+    const accountInfo = document.getElementById('accountInfo');
 
     let scanner = null;
     let isProcessing = false;
     let lastScanTime = 0;
-
+    let googleIdToken = '';
 
     // =====================================
     // TAMPILAN STATUS
@@ -130,6 +146,79 @@
       statusBox.textContent = message;
     }
 
+    // =====================================
+    // DECODE EMAIL UNTUK TAMPILAN
+    // VERIFIKASI ASLI TETAP DI SERVER
+    // =====================================
+
+    function getEmailFromCredential(jwt) {
+      try {
+        const payload = jwt.split('.')[1];
+        const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const decoded = atob(normalized);
+        const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+        return JSON.parse(new TextDecoder().decode(bytes)).email || '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+    // =====================================
+    // LOGIN GOOGLE
+    // =====================================
+
+    function initializeGoogleLogin() {
+      if (!window.google || !google.accounts) {
+        setTimeout(initializeGoogleLogin, 500);
+        return;
+      }
+
+      google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleLogin
+      });
+
+      google.accounts.id.renderButton(
+        document.getElementById('googleLogin'),
+        {
+          theme: 'outline',
+          size: 'large',
+          shape: 'rectangular',
+          text: 'signin_with',
+          width: 280
+        }
+      );
+    }
+
+    function handleGoogleLogin(response) {
+      const credential = response.credential;
+      const email = getEmailFromCredential(credential).toLowerCase();
+
+      if (email !== OFFICIAL_EMAIL) {
+        googleIdToken = '';
+        startButton.disabled = true;
+
+        accountInfo.textContent = 'Akun tidak diizinkan: ' + (email || 'tidak diketahui');
+
+        showMessage(
+          'LOGIN DITOLAK!\nGunakan akun ' + OFFICIAL_EMAIL,
+          'error'
+        );
+        return;
+      }
+
+      googleIdToken = credential;
+      accountInfo.textContent = 'Login sebagai: ' + email;
+
+      startButton.disabled = false;
+
+      showMessage(
+        'LOGIN BERHASIL.\nSilakan aktifkan scanner.',
+        'success'
+      );
+    }
+
+    window.addEventListener('load', initializeGoogleLogin);
 
     // =====================================
     // DETEKSI PERANGKAT
@@ -138,26 +227,19 @@
     function detectDevice() {
       const ua = navigator.userAgent;
 
-      if (
-        /iPad|Android/i.test(ua) ||
-        (
-          navigator.maxTouchPoints > 1 &&
-          Math.min(screen.width, screen.height) >= 600
-        )
-      ) {
+      if (/iPad|Android/i.test(ua) ||
+          (navigator.maxTouchPoints > 1 &&
+           Math.min(screen.width, screen.height) >= 600)) {
         return 'TABLET';
       }
 
-      if (/Mobile|iPhone|iPod/i.test(ua)) {
-        return 'HP';
-      }
+      if (/Mobile|iPhone|iPod/i.test(ua)) return 'HP';
 
       return 'KOMPUTER';
     }
 
-
     // =====================================
-    // AMBIL TOKEN DARI QR
+    // AMBIL TOKEN QR
     // =====================================
 
     function extractToken(decodedText) {
@@ -168,43 +250,44 @@
       }
     }
 
-
     // =====================================
-    // RESET STATUS SCANNER
+    // RESET SCANNER
     // =====================================
 
     function resetScanner() {
       setTimeout(function() {
         isProcessing = false;
 
-        showMessage(
-          'KAMERA AKTIF\nSilakan pindai QR berikutnya.',
-          'loading'
-        );
-
-      }, 2000);
+        if (googleIdToken) {
+          showMessage(
+            'KAMERA AKTIF\nSilakan pindai QR berikutnya.',
+            'loading'
+          );
+        }
+      }, 1500);
     }
 
-
     // =====================================
-    // KIRIM DATA ABSENSI KE SERVER
+    // KIRIM ABSENSI
     // =====================================
 
     function sendAttendance(token) {
+      if (!googleIdToken) {
+        showMessage('Silakan login Google terlebih dahulu.', 'error');
+        isProcessing = false;
+        return;
+      }
 
-      const callbackName = 'attendanceCallback';
+      const callbackName =
+        'attendanceCallback_' + Date.now();
+
       const script = document.createElement('script');
-
       let finished = false;
 
-
-      // BATAS WAKTU RESPONS SERVER
       const timeout = setTimeout(function() {
-
         if (finished) return;
 
         finished = true;
-
         delete window[callbackName];
         script.remove();
 
@@ -214,25 +297,17 @@
         );
 
         resetScanner();
-
       }, 15000);
 
-
-      // MENERIMA RESPONS DARI APPS SCRIPT
       window[callbackName] = function(response) {
-
         if (finished) return;
 
         finished = true;
-
         clearTimeout(timeout);
         delete window[callbackName];
-
         script.remove();
 
-
         if (response && response.success) {
-
           showMessage(
             'ABSENSI BERHASIL!\n\n' +
             'Nama: ' + response.name + '\n' +
@@ -242,9 +317,7 @@
             'Jam: ' + response.time,
             'success'
           );
-
         } else {
-
           showMessage(
             'ABSENSI GAGAL!\n' +
             (response && response.message
@@ -252,152 +325,85 @@
               : 'Respons server tidak valid.'),
             'error'
           );
-
         }
 
         resetScanner();
-
       };
 
-
-      // PARAMETER REQUEST
       const params = new URLSearchParams({
         action: 'scan',
         token: token,
         device: detectDevice(),
+        id_token: googleIdToken,
         callback: callbackName
       });
 
-
       script.src = SCRIPT_URL + '?' + params.toString();
 
-
-      // JIKA SCRIPT GAGAL DIMUAT
       script.onerror = function() {
-
         if (finished) return;
 
         finished = true;
-
         clearTimeout(timeout);
         delete window[callbackName];
-
         script.remove();
 
-        showMessage(
-          'GAGAL MENGHUBUNGI SERVER ABSENSI.',
-          'error'
-        );
-
+        showMessage('GAGAL MENGHUBUNGI SERVER ABSENSI.', 'error');
         resetScanner();
-
       };
-
-
-      // JIKA SCRIPT SUDAH DIMUAT
-      // TUNGGU CALLBACK DARI SERVER
-      script.onload = function() {
-
-        setTimeout(function() {
-
-          if (finished) return;
-
-          finished = true;
-
-          clearTimeout(timeout);
-          delete window[callbackName];
-
-          script.remove();
-
-          showMessage(
-            'SERVER MERESPONS, TETAPI CALLBACK TIDAK DITERIMA.',
-            'error'
-          );
-
-          resetScanner();
-
-        }, 1000);
-
-      };
-
 
       document.body.appendChild(script);
-
     }
 
-
     // =====================================
-    // PROSES SAAT QR BERHASIL DIPINDAI
+    // QR BERHASIL DIPINDAI
     // =====================================
 
     function onScanSuccess(decodedText) {
-
       const now = Date.now();
 
-      if (isProcessing || now - lastScanTime < 2000) {
-        return;
-      }
+      if (isProcessing || now - lastScanTime < 2000) return;
 
       const token = extractToken(decodedText);
 
-
       if (!token) {
-
         lastScanTime = now;
-
-        showMessage(
-          'QR TIDAK VALID.',
-          'error'
-        );
-
+        showMessage('QR TIDAK VALID.', 'error');
         return;
-
       }
-
 
       isProcessing = true;
       lastScanTime = now;
 
-      showMessage(
-        'MEMPROSES ABSENSI...',
-        'loading'
-      );
-
+      showMessage('MEMPROSES ABSENSI...', 'loading');
       sendAttendance(token);
-
     }
 
-
     // =====================================
-    // MULAI SCANNER KAMERA BELAKANG
+    // MULAI SCANNER
     // =====================================
 
     async function startScanner() {
+      if (!googleIdToken) {
+        showMessage('Login Google terlebih dahulu.', 'error');
+        return;
+      }
 
       startButton.disabled = true;
 
       try {
-
         if (!scanner) {
           scanner = new Html5Qrcode('reader');
         }
 
         await scanner.start(
-
           { facingMode: 'environment' },
-
           {
-            fps: 10,
-            qrbox: {
-              width: 250,
-              height: 250
-            }
+            fps: 15,
+            qrbox: { width: 250, height: 250 }
           },
-
           onScanSuccess
-
         );
-
 
         showMessage(
           'KAMERA AKTIF.\nARAHKAN KE QR KARYAWAN.',
@@ -407,19 +413,15 @@
         startButton.style.display = 'none';
 
       } catch (error) {
-
         showMessage(
           'KAMERA GAGAL DIAKTIFKAN.\n' + error.message,
           'error'
         );
 
         startButton.disabled = false;
-
       }
-
     }
-
   </script>
-
 </body>
 </html>
+```
