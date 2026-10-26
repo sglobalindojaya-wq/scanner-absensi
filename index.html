@@ -69,8 +69,8 @@
       Scanner siap diaktifkan.
     </div>
 
-    <button id="startButton" onclick="startScanner()">
-      MULAI SCANNER
+    <button onclick="testServer()">
+      TES KONEKSI SERVER
     </button>
   </div>
 
@@ -101,12 +101,36 @@
     }
 
     function extractToken(decodedText) {
-      try {
-        return new URL(decodedText).searchParams.get('token') || '';
-      } catch (error) {
-        return '';
+        try {
+          return new URL(decodedText).searchParams.get('token') || '';
+        } catch (error) {
+          return '';
+        }
       }
-    }
+  
+      function testServer() {
+    const testUrl = SCRIPT_URL + '?action=scan&token=TEST&device=TABLET&callback=attendanceCallback';
+  
+    window.attendanceCallback = function(response) {
+      showMessage(
+        'SERVER TERHUBUNG!\n' + JSON.stringify(response),
+        'success'
+      );
+      delete window.attendanceCallback;
+    };
+  
+    const testScript = document.createElement('script');
+    testScript.src = testUrl;
+  
+    testScript.onerror = function() {
+      showMessage(
+        'GAGAL MEMUAT URL APPS SCRIPT DARI GITHUB.',
+        'error'
+      );
+    };
+  
+    document.body.appendChild(testScript);
+  }
 
     function sendAttendance(token) {
   const callbackName = 'attendanceCallback';
