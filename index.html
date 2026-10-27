@@ -123,7 +123,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbzwjHDPVBIOeaWNaRzYaQiamRe9EcNmFZlWW9zSKhQUKl-uQCt5lH49IXhcvbkVG3p7/exec';
+      'https://script.google.com/macros/s/AKfycbxOvneGzZnJGONvHIQfVXmwhjPgp-uxCYguxdfeOtJgVQfSlifYr9L_jIXgEKTe29wX/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -244,7 +244,6 @@ async function uploadFacePhoto(imageData, requestId, token) {
 
   const iframe = document.createElement('iframe');
   const frameName = 'uploadFrame_' + requestId;
-
   iframe.name = frameName;
   iframe.style.display = 'none';
 
@@ -266,43 +265,67 @@ async function uploadFacePhoto(imageData, requestId, token) {
   input.type = 'hidden';
   input.name = 'payload';
   input.value = JSON.stringify(payload);
-
   form.appendChild(input);
-  document.body.appendChild(iframe);
-  document.body.appendChild(form);
 
   try {
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Waktu pengiriman foto habis.'));
-      }, 30000);
-
-      iframe.onload = function() {
-        clearTimeout(timeout);
+    // Tunggu iframe siap lebih dahulu agar event load awal tidak
+    // dianggap sebagai tanda bahwa POST sudah selesai.
+    const iframeReady = new Promise((resolve, reject) => {
+      const readyTimeout = setTimeout(
+        () => reject(new Error('Frame upload gagal disiapkan.')),
+        10000
+      );
+      iframe.addEventListener('load', function onInitialLoad() {
+        clearTimeout(readyTimeout);
         resolve();
-      };
-
-      form.submit();
+      }, { once: true });
     });
 
-    // Periksa apakah foto benar-benar sudah tersimpan.
-    for (let i = 0; i < 15; i++) {
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+    await iframeReady;
+
+    const uploadFinished = new Promise((resolve, reject) => {
+      const uploadTimeout = setTimeout(
+        () => reject(new Error('Waktu pengiriman foto habis.')),
+        45000
+      );
+
+      iframe.addEventListener('load', function onUploadLoad() {
+        clearTimeout(uploadTimeout);
+        resolve();
+      }, { once: true });
+    });
+
+    form.submit();
+    await uploadFinished;
+
+    // Konfirmasi dilakukan melalui JSONP karena halaman GitHub
+    // dan Google Apps Script berada pada domain berbeda.
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const callbackName =
+        'photoStatusCallback_' + Date.now() + '_' + attempt;
+
       const result = await new Promise((resolve, reject) => {
-        const callbackName = 'photoStatusCallback_' + Date.now() + '_' + i;
         const script = document.createElement('script');
+        let settled = false;
 
-        const timeout = setTimeout(() => {
-          delete window[callbackName];
-          script.remove();
-          reject(new Error('Gagal memeriksa status foto.'));
-        }, 10000);
-
-        window[callbackName] = function(response) {
+        const finish = (callback, value) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
           delete window[callbackName];
           script.remove();
-          resolve(response);
+          callback(value);
         };
+
+        const timeout = setTimeout(() => {
+          finish(reject, new Error(
+            'Server tidak merespons saat memeriksa status foto.'
+          ));
+        }, 10000);
+
+        window[callbackName] = response => finish(resolve, response);
 
         const params = new URLSearchParams({
           action: 'photostatus',
@@ -312,31 +335,34 @@ async function uploadFacePhoto(imageData, requestId, token) {
         });
 
         script.src = SCRIPT_URL + '?' + params.toString();
-        script.onerror = function() {
-          clearTimeout(timeout);
-          delete window[callbackName];
-          script.remove();
-          reject(new Error('Gagal menghubungi server untuk konfirmasi foto.'));
-        };
+        script.onerror = () => finish(reject, new Error(
+          'Gagal menghubungi server untuk konfirmasi foto.'
+        ));
 
         document.body.appendChild(script);
       });
 
-      if (result && result.success) {
-        return result;
+      if (result && result.success) return result;
+
+      if (result && result.message &&
+          result.message !== 'Foto belum tersimpan.') {
+        throw new Error(result.message);
       }
 
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    throw new Error('Foto belum terkonfirmasi tersimpan di Google Drive.');
+    throw new Error(
+      'Foto belum terkonfirmasi tersimpan di Google Drive. Periksa izin folder Drive dan deployment Apps Script.'
+    );
 
   } finally {
     form.remove();
     iframe.remove();
   }
 }
-    // =====================================
+
+        // =====================================
     // TAMPILAN STATUS
     // =====================================
 
