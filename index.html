@@ -123,7 +123,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbw6i-1DW5DSt1uNtqzupAtkyk2BzX6al7A0K0ljHy0m7drEE1gyRcz9H4NYYxmqoA-v/exec';
+      'https://script.google.com/macros/s/AKfycby-rG5BslEqncw3p2gXWjKl73MaMeG33OojkIsp9rmfRvqtqc4kSlCa7XLkVyoQ08Fb/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -162,7 +162,6 @@ async function captureFacePhoto() {
       throw new Error('Browser tidak mendukung akses kamera.');
     }
 
-    showMessage('MEMBUKA KAMERA DEPAN...', 'loading');
 
     faceStream = await navigator.mediaDevices.getUserMedia({
       video: {
@@ -203,7 +202,6 @@ async function captureFacePhoto() {
       checkCamera();
     });
 
-    showMessage('MENGAMBIL FOTO WAJAH...', 'loading');
 
     const context = faceCanvas.getContext('2d');
 
@@ -237,10 +235,8 @@ async function captureFacePhoto() {
     isCapturingFace = false;
   }
 }
-async function uploadFacePhoto(imageData, requestId, token) {
-  if (!imageData || !requestId || !token) {
-    throw new Error('Data foto tidak lengkap.');
-  }
+function uploadFacePhotoInBackground(imageData, requestId, token) {
+  if (!imageData || !requestId || !token) return;
 
   const iframe = document.createElement('iframe');
   const frameName = 'uploadFrame_' + requestId;
@@ -254,112 +250,57 @@ async function uploadFacePhoto(imageData, requestId, token) {
   form.enctype = 'application/x-www-form-urlencoded';
   form.style.display = 'none';
 
-  const payload = {
+  const input = document.createElement('input');
+  input.type = 'hidden';
+  input.name = 'payload';
+  input.value = JSON.stringify({
     action: 'uploadPhoto',
     requestId: requestId,
     token: token,
     imageData: imageData
-  };
-
-  const input = document.createElement('input');
-  input.type = 'hidden';
-  input.name = 'payload';
-  input.value = JSON.stringify(payload);
+  });
   form.appendChild(input);
 
-  try {
-    // Tunggu iframe siap lebih dahulu agar event load awal tidak
-    // dianggap sebagai tanda bahwa POST sudah selesai.
-    const iframeReady = new Promise((resolve, reject) => {
-      const readyTimeout = setTimeout(
-        () => reject(new Error('Frame upload gagal disiapkan.')),
-        10000
-      );
-      iframe.addEventListener('load', function onInitialLoad() {
-        clearTimeout(readyTimeout);
-        resolve();
-      }, { once: true });
-    });
+  let submitted = false;
+  let initialLoadSeen = false;
+  let cleaned = false;
+  let fallbackTimer;
 
-    document.body.appendChild(iframe);
-    document.body.appendChild(form);
-    await iframeReady;
-
-    const uploadFinished = new Promise((resolve, reject) => {
-      const uploadTimeout = setTimeout(
-        () => reject(new Error('Waktu pengiriman foto habis.')),
-        45000
-      );
-
-      iframe.addEventListener('load', function onUploadLoad() {
-        clearTimeout(uploadTimeout);
-        resolve();
-      }, { once: true });
-    });
-
-    form.submit();
-    await uploadFinished;
-
-    // Konfirmasi dilakukan melalui JSONP karena halaman GitHub
-    // dan Google Apps Script berada pada domain berbeda.
-    for (let attempt = 0; attempt < 15; attempt++) {
-      const callbackName =
-        'photoStatusCallback_' + Date.now() + '_' + attempt;
-
-      const result = await new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        let settled = false;
-
-        const finish = (callback, value) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          delete window[callbackName];
-          script.remove();
-          callback(value);
-        };
-
-        const timeout = setTimeout(() => {
-          finish(reject, new Error(
-            'Server tidak merespons saat memeriksa status foto.'
-          ));
-        }, 10000);
-
-        window[callbackName] = response => finish(resolve, response);
-
-        const params = new URLSearchParams({
-          action: 'photostatus',
-          requestId: requestId,
-          token: token,
-          callback: callbackName
-        });
-
-        script.src = SCRIPT_URL + '?' + params.toString();
-        script.onerror = () => finish(reject, new Error(
-          'Gagal menghubungi server untuk konfirmasi foto.'
-        ));
-
-        document.body.appendChild(script);
-      });
-
-      if (result && result.success) return result;
-
-      if (result && result.message &&
-          result.message !== 'Foto belum tersimpan.') {
-        throw new Error(result.message);
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    throw new Error(
-      'Foto belum terkonfirmasi tersimpan di Google Drive. Periksa izin folder Drive dan deployment Apps Script.'
-    );
-
-  } finally {
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearTimeout(fallbackTimer);
     form.remove();
     iframe.remove();
-  }
+  };
+
+  // Load pertama menandakan iframe siap. Load berikutnya adalah respons POST.
+  iframe.addEventListener('load', function() {
+    if (!initialLoadSeen) {
+      initialLoadSeen = true;
+      if (!submitted) {
+        submitted = true;
+        clearTimeout(fallbackTimer);
+        form.submit();
+      }
+    } else {
+      cleanup();
+    }
+  });
+
+  document.body.appendChild(iframe);
+  document.body.appendChild(form);
+
+  // Fallback jika browser tidak mengirim event load awal iframe.
+  fallbackTimer = setTimeout(function() {
+    if (!submitted && document.body.contains(iframe)) {
+      submitted = true;
+      form.submit();
+    }
+  }, 5000);
+
+  // Bersihkan elemen jika server tidak pernah mengirim respons iframe.
+  setTimeout(cleanup, 120000);
 }
 
         // =====================================
@@ -572,74 +513,70 @@ async function uploadFacePhoto(imageData, requestId, token) {
         return;
       }
 
-            // Buat ID unik untuk menghubungkan foto dengan absensi.
-            const requestId = (
-              window.crypto && crypto.randomUUID
-                ? crypto.randomUUID()
-                : Date.now() + '_' + Math.random().toString(36).slice(2)
-            );
-      
-            // Ambil foto wajah menggunakan kamera depan.
-            try {
-          showMessage('MENGHENTIKAN KAMERA SCANNER...', 'loading');
-        
-          // Hentikan kamera belakang sementara.
-          if (scanner && scanner.isScanning) {
-            await scanner.stop();
-          }
-        
-          showMessage('MENGAMBIL FOTO WAJAH...', 'loading');
-        
-          // Aktifkan kamera depan dan ambil foto.
-          const imageData = await captureFacePhoto();
-        
-          showMessage('MENGUNGGAH FOTO...', 'loading');
-        
-          await uploadFacePhoto(imageData, requestId, token);
-        
-        } catch (error) {
-          showMessage(
-            'GAGAL MENGAMBIL / MENGIRIM FOTO!\n' +
-            (error.message || error),
-            'error'
-          );
-        
-          console.error('ERROR FOTO:', error);
-          isProcessing = false;
-        
-          return;
+      const requestId = (
+        window.crypto && crypto.randomUUID
+          ? crypto.randomUUID()
+          : Date.now() + '_' + Math.random().toString(36).slice(2)
+      );
+
+      // Kamera belakang dihentikan sementara agar kamera depan bisa mengambil foto.
+      try {
+        if (scanner && scanner.isScanning) {
+          await scanner.stop();
         }
+      } catch (cameraStopError) {
+        console.warn('Kamera scanner tidak perlu dihentikan:', cameraStopError);
+      }
 
-      // Harus sama persis dengan callback yang diizinkan oleh doGet(e) di Kode.gs.
+      // Foto mulai diambil, tetapi hasilnya TIDAK ditunggu sebelum mengirim absensi.
+      // Kegagalan foto tidak boleh membatalkan pencatatan absensi.
+      const photoPromise = captureFacePhoto().catch(error => {
+        console.error('PENGAMBILAN FOTO GAGAL:', error);
+        return null;
+      });
+
       const callbackName = 'attendanceCallback';
-
       const script = document.createElement('script');
       let finished = false;
+      let resetStarted = false;
+
+      const finishAndReset = () => {
+        if (resetStarted) return;
+        resetStarted = true;
+
+        // Tunggu hanya sampai kamera depan selesai mengambil gambar,
+        // bukan sampai upload Google Drive selesai.
+        photoPromise.then(imageData => {
+          if (imageData && attendanceSucceeded) {
+            uploadFacePhotoInBackground(imageData, requestId, token);
+          }
+          resetScanner();
+        });
+      };
+
+      let attendanceSucceeded = false;
 
       const timeout = setTimeout(function() {
         if (finished) return;
-
         finished = true;
         delete window[callbackName];
         script.remove();
-
         showMessage(
           'SERVER TIDAK MEMBERIKAN RESPONS.\nPeriksa koneksi internet.',
           'error'
         );
-
-        resetScanner();
+        finishAndReset();
       }, 15000);
 
       window[callbackName] = function(response) {
         if (finished) return;
-
         finished = true;
         clearTimeout(timeout);
         delete window[callbackName];
         script.remove();
 
         if (response && response.success) {
+          attendanceSucceeded = true;
           showMessage(
             'ABSENSI BERHASIL!\n\n' +
             'Nama: ' + response.name + '\n' +
@@ -663,11 +600,10 @@ async function uploadFacePhoto(imageData, requestId, token) {
               sessionStorage.removeItem('absensi_google_id_token');
             } catch (storageError) {}
           }
-
           showMessage('ABSENSI GAGAL!\n' + errorMessage, 'error');
         }
 
-        resetScanner();
+        finishAndReset();
       };
 
       const params = new URLSearchParams({
@@ -680,17 +616,14 @@ async function uploadFacePhoto(imageData, requestId, token) {
       });
 
       script.src = SCRIPT_URL + '?' + params.toString();
-
       script.onerror = function() {
         if (finished) return;
-
         finished = true;
         clearTimeout(timeout);
         delete window[callbackName];
         script.remove();
-
         showMessage('GAGAL MENGHUBUNGI SERVER ABSENSI.', 'error');
-        resetScanner();
+        finishAndReset();
       };
 
       document.body.appendChild(script);
