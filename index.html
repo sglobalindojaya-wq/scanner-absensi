@@ -277,7 +277,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbyJSPekSan--dxSQ9E1HDjyLWXAXLBt2X16-lTmBeGuzEux_NH-jJninmMxyZTwK9Aj/exec';
+      'https://script.google.com/macros/s/AKfycbz1x1qFpN0J2J9_KAQrquVpws7yxWz66cC7LsY3lM26EsztBL8L2mqaL_jWQcS2Lzc/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -304,6 +304,66 @@
     let isCapturingFace = false;
 
     
+// =====================================
+// RESET RIWAYAT PANEL FOTO SETIAP 12 JAM
+// Hanya membersihkan pesan yang sudah selesai/gagal.
+// Upload yang masih berjalan tidak pernah dihapus.
+// =====================================
+const PHOTO_HISTORY_RESET_KEY = 'absensi_photo_history_reset_at';
+const PHOTO_HISTORY_INTERVAL = 12 * 60 * 60 * 1000;
+
+function ensureQueueEmptyMessage() {
+  const queue = document.getElementById('photoQueue');
+  if (!queue.querySelector('.chat-message') &&
+      !queue.querySelector('.queue-empty')) {
+    const empty = document.createElement('div');
+    empty.className = 'queue-empty';
+    empty.id = 'queueEmpty';
+    empty.innerHTML = 'Belum ada foto yang diproses.<br>Setelah karyawan scan QR, status foto akan muncul di sini.';
+    queue.appendChild(empty);
+  }
+}
+
+function resetCompletedPhotoHistory() {
+  const queue = document.getElementById('photoQueue');
+  if (!queue) return;
+
+  // Pesan aktif (mengambil foto/mengunggah/mencoba ulang) dipertahankan.
+  queue.querySelectorAll('.chat-message').forEach(item => {
+    const state = item.querySelector('.upload-state');
+    if (state && (state.classList.contains('done') ||
+                  state.classList.contains('failed'))) {
+      item.remove();
+    }
+  });
+
+  localStorage.setItem(PHOTO_HISTORY_RESET_KEY, String(Date.now()));
+  ensureQueueEmptyMessage();
+  updateQueueSummary();
+}
+
+function initializePhotoHistoryReset() {
+  let lastReset = 0;
+  try {
+    lastReset = Number(localStorage.getItem(PHOTO_HISTORY_RESET_KEY) || 0);
+  } catch (e) {}
+
+  if (!lastReset) {
+    try { localStorage.setItem(PHOTO_HISTORY_RESET_KEY, String(Date.now())); } catch (e) {}
+  } else if (Date.now() - lastReset >= PHOTO_HISTORY_INTERVAL) {
+    resetCompletedPhotoHistory();
+  }
+
+  // Pemeriksaan setiap menit agar reset tetap terjadi saat halaman terbuka.
+  setInterval(() => {
+    let saved = 0;
+    try { saved = Number(localStorage.getItem(PHOTO_HISTORY_RESET_KEY) || 0); } catch (e) {}
+    if (!saved || Date.now() - saved >= PHOTO_HISTORY_INTERVAL) {
+      resetCompletedPhotoHistory();
+    }
+  }, 60 * 1000);
+}
+
 async function captureFacePhoto() {
   if (isCapturingFace) {
     throw new Error('Kamera sedang mengambil foto.');
@@ -732,7 +792,10 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       );
     }
 
-    window.addEventListener('load', initializeGoogleLogin);
+    window.addEventListener('load', () => {
+      initializeGoogleLogin();
+      initializePhotoHistoryReset();
+    });
 
     // =====================================
     // DETEKSI PERANGKAT
@@ -769,28 +832,24 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     // =====================================
 
     async function resetScanner() {
-      setTimeout(async function() {
-        isProcessing = false;
-    
-        if (googleIdToken) {
-          try {
-            if (!scanner || !scanner.isScanning) {
-              await startScanner();
-            }
-    
-            showMessage(
-              'KAMERA AKTIF\nSilakan pindai QR berikutnya.',
-              'success'
-            );
-    
-          } catch (error) {
-            showMessage(
-              'KAMERA GAGAL DIAKTIFKAN.\n' + error.message,
-              'error'
-            );
-          }
+      // Lepaskan kunci scan segera setelah kamera siap kembali.
+      isProcessing = false;
+      if (!googleIdToken) return;
+
+      try {
+        if (!scanner || !scanner.isScanning) {
+          await startScanner();
         }
-      }, 1500);
+        showMessage(
+          'KAMERA AKTIF\nSilakan pindai QR berikutnya.',
+          'success'
+        );
+      } catch (error) {
+        showMessage(
+          'KAMERA GAGAL DIAKTIFKAN.\n' + error.message,
+          'error'
+        );
+      }
     }
 
     // =====================================
@@ -798,133 +857,136 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     // =====================================
 
     async function sendAttendance(token) {
-  if (!googleIdToken) {
-    showMessage('Silakan login Google terlebih dahulu.', 'error');
-    isProcessing = false;
-    return;
-  }
-
-  const requestId = (
-    window.crypto && crypto.randomUUID
-      ? crypto.randomUUID()
-      : Date.now() + '_' + Math.random().toString(36).slice(2)
-  );
-
-  // Kamera belakang dihentikan sementara agar kamera depan dapat
-  // mengambil foto wajah. Absensi dikirim lebih dahulu ke server.
-  try {
-    showMessage('MEMPROSES ABSENSI...', 'loading');
-
-    if (scanner && scanner.isScanning) {
-      await scanner.stop();
-    }
-
-    const response = await new Promise((resolve, reject) => {
-      const callbackName = 'attendanceCallback';
-      const script = document.createElement('script');
-      let finished = false;
-
-      const timeout = setTimeout(() => {
-        if (finished) return;
-        finished = true;
-        delete window[callbackName];
-        script.remove();
-        reject(new Error('Server tidak memberikan respons. Periksa koneksi internet.'));
-      }, 15000);
-
-      window[callbackName] = result => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        delete window[callbackName];
-        script.remove();
-        resolve(result);
-      };
-
-      const params = new URLSearchParams({
-        action: 'scan',
-        token: token,
-        device: detectDevice(),
-        id_token: googleIdToken,
-        requestId: requestId,
-        callback: callbackName
-      });
-
-      script.src = SCRIPT_URL + '?' + params.toString();
-      script.onerror = () => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        delete window[callbackName];
-        script.remove();
-        reject(new Error('Gagal menghubungi server absensi.'));
-      };
-
-      document.body.appendChild(script);
-    });
-
-    if (!response || !response.success) {
-      const errorMessage = response && response.message
-        ? response.message
-        : 'Respons server tidak valid.';
-
-      if (/login google tidak valid|sesi login google sudah kedaluwarsa|silakan login/i.test(errorMessage)) {
-        googleIdToken = '';
-        startButton.disabled = true;
-        document.getElementById('googleLogin').style.display = 'flex';
-        accountInfo.textContent = 'Sesi login berakhir. Silakan login kembali.';
-        try {
-          sessionStorage.removeItem('absensi_google_id_token');
-        } catch (storageError) {}
+      if (!googleIdToken) {
+        showMessage('Silakan login Google terlebih dahulu.', 'error');
+        isProcessing = false;
+        return;
       }
 
-      throw new Error(errorMessage);
-    }
-
-    // Titik ini berarti baris absensi sudah tercatat di Spreadsheet.
-    showMessage(
-      'ABSENSI BERHASIL!\n\n' +
-      'Nama: ' + response.name + '\n' +
-      'Departemen: ' + response.department + '\n' +
-      'Aktivitas: ' + response.activity + '\n' +
-      'Tanggal: ' + response.date + '\n' +
-      'Jam: ' + response.time,
-      'success'
-    );
-
-    const queueItem = addPhotoQueueItem(response);
-    updatePhotoState(requestId, 'Absensi tercatat. Mengambil foto wajah...', '');
-
-    // Foto diambil setelah absensi tercatat. Jika kamera gagal,
-    // absensi tidak dibatalkan dan statusnya tetap terlihat di panel chat.
-    try {
-      const imageData = await captureFacePhoto();
-
-      const preview = document.createElement('img');
-      preview.src = imageData;
-      preview.alt = 'Foto absensi ' + (response.name || '');
-      queueItem.insertBefore(preview, queueItem.querySelector('.upload-state'));
-
-      updatePhotoState(requestId, 'Foto siap. Mengirim ke Google Drive...', '');
-      startBackgroundPhotoUpload(imageData, requestId, token);
-
-    } catch (photoError) {
-      updatePhotoState(
-        requestId,
-        'Absensi sudah tercatat, tetapi foto gagal diambil: ' +
-          (photoError.message || photoError),
-        'failed'
+      const requestId = (
+        window.crypto && crypto.randomUUID
+          ? crypto.randomUUID()
+          : Date.now() + '_' + Math.random().toString(36).slice(2)
       );
-      console.error('ERROR AMBIL FOTO:', photoError);
-    }
 
-  } catch (error) {
-    showMessage('ABSENSI GAGAL!\n' + (error.message || error), 'error');
-    console.error('ERROR ABSENSI:', error);
-  } finally {
-    resetScanner();
-  }
-}
+      let attendanceSaved = false;
+      try {
+        // Jangan hentikan scanner sebelum server menyelesaikan pencatatan.
+        // isProcessing mencegah QR yang sama diproses berulang.
+        showMessage('MENCATAT ABSENSI...', 'loading');
+
+        const response = await new Promise((resolve, reject) => {
+          const callbackName = 'attendanceCallback';
+          const script = document.createElement('script');
+          let finished = false;
+
+          const timeout = setTimeout(() => {
+            if (finished) return;
+            finished = true;
+            delete window[callbackName];
+            script.remove();
+            reject(new Error('Server tidak memberikan respons. Periksa koneksi internet.'));
+          }, 15000);
+
+          window[callbackName] = result => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeout);
+            delete window[callbackName];
+            script.remove();
+            resolve(result);
+          };
+
+          const params = new URLSearchParams({
+            action: 'scan',
+            token: token,
+            device: detectDevice(),
+            id_token: googleIdToken,
+            requestId: requestId,
+            callback: callbackName
+          });
+
+          script.src = SCRIPT_URL + '?' + params.toString();
+          script.onerror = () => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeout);
+            delete window[callbackName];
+            script.remove();
+            reject(new Error('Gagal menghubungi server absensi.'));
+          };
+
+          document.body.appendChild(script);
+        });
+
+        if (!response || !response.success) {
+          const errorMessage = response && response.message
+            ? response.message
+            : 'Respons server tidak valid.';
+
+          if (/login google tidak valid|sesi login google sudah kedaluwarsa|silakan login/i.test(errorMessage)) {
+            googleIdToken = '';
+            startButton.disabled = true;
+            document.getElementById('googleLogin').style.display = 'flex';
+            accountInfo.textContent = 'Sesi login berakhir. Silakan login kembali.';
+            try { sessionStorage.removeItem('absensi_google_id_token'); } catch (storageError) {}
+          }
+          throw new Error(errorMessage);
+        }
+
+        attendanceSaved = true;
+        showMessage(
+          'ABSENSI BERHASIL!\n\n' +
+          'Nama: ' + response.name + '\n' +
+          'Departemen: ' + response.department + '\n' +
+          'Aktivitas: ' + response.activity + '\n' +
+          'Tanggal: ' + response.date + '\n' +
+          'Jam: ' + response.time,
+          'success'
+        );
+
+        const queueItem = addPhotoQueueItem(response);
+        updatePhotoState(requestId, 'Absensi tercatat. Mengambil foto wajah...', '');
+
+        // Hentikan kamera belakang hanya saat kamera depan akan dipakai.
+        if (scanner && scanner.isScanning) {
+          await scanner.stop();
+        }
+
+        try {
+          const imageData = await captureFacePhoto();
+          const preview = document.createElement('img');
+          preview.src = imageData;
+          preview.alt = 'Foto absensi ' + (response.name || '');
+          queueItem.insertBefore(preview, queueItem.querySelector('.upload-state'));
+
+          updatePhotoState(requestId, 'Foto siap. Mengirim ke Google Drive...', '');
+
+          // Upload berjalan di latar belakang. Tidak ditunggu di sini.
+          startBackgroundPhotoUpload(imageData, requestId, token);
+        } catch (photoError) {
+          updatePhotoState(
+            requestId,
+            'Absensi sudah tercatat, tetapi foto gagal diambil: ' +
+              (photoError.message || photoError),
+            'failed'
+          );
+          console.error('ERROR AMBIL FOTO:', photoError);
+        }
+
+      } catch (error) {
+        showMessage(
+          (attendanceSaved ? 'ABSENSI TERCATAT.' : 'ABSENSI GAGAL!') +
+          '\n' + (error.message || error),
+          attendanceSaved ? 'success' : 'error'
+        );
+        console.error('ERROR ABSENSI:', error);
+      } finally {
+        // Kamera scanner langsung dinyalakan kembali setelah proses foto,
+        // tanpa menunggu proses upload foto ke Drive.
+        await resetScanner();
+      }
+    }
 
         // =====================================
     // QR BERHASIL DIPINDAI
