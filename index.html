@@ -58,6 +58,55 @@
       color: #333;
     }
 
+    #attendanceToast {
+      position: fixed;
+      left: 50%;
+      top: 16px;
+      transform: translate(-50%, -12px);
+      width: min(92vw, 440px);
+      z-index: 99999;
+      padding: 14px 17px;
+      border-radius: 12px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.22);
+      text-align: left;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity .2s ease, transform .2s ease, visibility .2s;
+      white-space: pre-line;
+      overflow-wrap: anywhere;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    #attendanceToast.show {
+      opacity: 1;
+      visibility: visible;
+      transform: translate(-50%, 0);
+    }
+    #attendanceToast.success {
+      background: #dcfce7;
+      color: #166534;
+      border: 2px solid #22c55e;
+    }
+    #attendanceToast.error {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 2px solid #ef4444;
+    }
+    #attendanceToast .toast-title {
+      display: block;
+      font-size: 15px;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+    #attendanceToast .toast-detail {
+      display: block;
+      font-size: 13px;
+    }
+    @media (max-width: 600px) {
+      #attendanceToast { top: 10px; padding: 12px 14px; font-size: 13px; }
+    }
+
     button {
       width: 100%;
       padding: 16px;
@@ -229,6 +278,8 @@
 </head>
 
 <body>
+  <div id="attendanceToast" role="alert" aria-live="assertive"></div>
+
   <div style="max-width:1180px;margin:0 auto;text-align:center;">
     <h2 style="margin-bottom:5px;">ABSENSI PABRIK</h2>
     <p style="margin-top:0;">PT SHARK GLOBALINDO JAYA</p>
@@ -277,7 +328,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbz1x1qFpN0J2J9_KAQrquVpws7yxWz66cC7LsY3lM26EsztBL8L2mqaL_jWQcS2Lzc/exec';
+      'https://script.google.com/macros/s/AKfycbzX09veB8vDkhnZRmCloB6AhHeIgvXQS8xuYtBbvJMni5dGBF_1OvUa40LZ1QoCfCab/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -663,6 +714,33 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       statusBox.textContent = message;
     }
 
+    let attendanceToastTimer = null;
+
+    function showAttendanceNotification(title, detail, type) {
+      const toast = document.getElementById('attendanceToast');
+      if (!toast) return;
+
+      toast.className = type || 'success';
+      toast.replaceChildren();
+
+      const titleNode = document.createElement('span');
+      titleNode.className = 'toast-title';
+      titleNode.textContent = title;
+
+      const detailNode = document.createElement('span');
+      detailNode.className = 'toast-detail';
+      detailNode.textContent = detail || '';
+
+      toast.appendChild(titleNode);
+      toast.appendChild(detailNode);
+      toast.classList.add('show');
+
+      if (attendanceToastTimer) clearTimeout(attendanceToastTimer);
+      attendanceToastTimer = setTimeout(() => {
+        toast.classList.remove('show');
+      }, 5000);
+    }
+
     // =====================================
     // DECODE EMAIL UNTUK TAMPILAN
     // VERIFIKASI ASLI TETAP DI SERVER
@@ -945,6 +1023,16 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           'success'
         );
 
+        showAttendanceNotification(
+          '✓ ABSENSI ' + String(response.activity || 'BERHASIL').toUpperCase(),
+          (response.name || 'Nama karyawan tidak tersedia') +
+            (response.id || response.employeeId ? ' · ' + (response.id || response.employeeId) : '') +
+            '\n' + (response.department || '-') +
+            ' · ' + (response.time || '-') +
+            ' · ' + (response.date || '-'),
+          'success'
+        );
+
         const queueItem = addPhotoQueueItem(response);
         updatePhotoState(requestId, 'Absensi tercatat. Mengambil foto wajah...', '');
 
@@ -975,11 +1063,23 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         }
 
       } catch (error) {
+        const failureText = error.message || String(error);
         showMessage(
           (attendanceSaved ? 'ABSENSI TERCATAT.' : 'ABSENSI GAGAL!') +
-          '\n' + (error.message || error),
+          '\n' + failureText,
           attendanceSaved ? 'success' : 'error'
         );
+
+        if (!attendanceSaved) {
+          showAttendanceNotification('✕ ABSENSI GAGAL', failureText, 'error');
+        } else {
+          showAttendanceNotification(
+            '✓ ABSENSI TETAP TERCATAT',
+            'Foto belum berhasil diproses. ' + failureText,
+            'success'
+          );
+        }
+
         console.error('ERROR ABSENSI:', error);
       } finally {
         // Kamera scanner langsung dinyalakan kembali setelah proses foto,
@@ -1002,6 +1102,11 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       if (!token) {
         lastScanTime = now;
         showMessage('QR TIDAK VALID.', 'error');
+        showAttendanceNotification(
+          '✕ QR TIDAK VALID',
+          'QR tidak dikenali. Silakan gunakan kartu QR karyawan yang benar.',
+          'error'
+        );
         return;
       }
 
