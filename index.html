@@ -328,7 +328,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbzpsux0x8RQ7PtTwM-6ykEkO_U2KXWnL0F45764yGPii1OXxVu713UmRJLMAI4iEzJ4/exec';
+      'https://script.google.com/macros/s/AKfycbwQmv_7h187LGafj70ivGWXmgxWfWm0nK2-_guqFV3WUH8uAV1uYNR7Et0jiJGjI3Mt/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -820,9 +820,10 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       document.getElementById('googleLogin').style.display = 'none';
 
       showMessage(
-        'LOGIN BERHASIL.\nSilakan aktifkan scanner.',
+        'LOGIN BERHASIL.\nMemeriksa antrean absensi...',
         'success'
       );
+      syncPendingAttendanceQueue();
     }
 
     function restoreGoogleSession() {
@@ -865,9 +866,10 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       document.getElementById('googleLogin').style.display = 'none';
 
       showMessage(
-        'SESI LOGIN DIPULIHKAN.\nSilakan klik MULAI SCANNER.',
+        'SESI LOGIN DIPULIHKAN.\nMemeriksa antrean absensi...',
         'success'
       );
+      syncPendingAttendanceQueue();
     }
 
     window.addEventListener('load', () => {
@@ -904,6 +906,95 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         return '';
       }
     }
+
+    // =====================================
+    // ANTREAN ABSENSI LOKAL (INDEXEDDB)
+    // =====================================
+    const ATTENDANCE_DB_NAME = 'GLOBALINDO_ABSENSI_DB';
+    const ATTENDANCE_STORE = 'pending_attendance';
+    let attendanceDbPromise = null;
+    let isSyncingAttendanceQueue = false;
+
+    function openAttendanceDb() {
+      if (attendanceDbPromise) return attendanceDbPromise;
+      attendanceDbPromise = new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error('Browser tidak mendukung penyimpanan antrean lokal.'));
+          return;
+        }
+        const request = indexedDB.open(ATTENDANCE_DB_NAME, 1);
+        request.onupgradeneeded = event => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(ATTENDANCE_STORE)) {
+            db.createObjectStore(ATTENDANCE_STORE, { keyPath: 'requestId' });
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error('Gagal membuka antrean lokal.'));
+      });
+      return attendanceDbPromise;
+    }
+
+    async function savePendingAttendance(item) {
+      const db = await openAttendanceDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(ATTENDANCE_STORE, 'readwrite');
+        tx.objectStore(ATTENDANCE_STORE).put(item);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error || new Error('Gagal menyimpan antrean absensi.'));
+        tx.onabort = () => reject(tx.error || new Error('Penyimpanan antrean dibatalkan.'));
+      });
+    }
+
+    async function removePendingAttendance(requestId) {
+      const db = await openAttendanceDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(ATTENDANCE_STORE, 'readwrite');
+        tx.objectStore(ATTENDANCE_STORE).delete(requestId);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error || new Error('Gagal memperbarui antrean.'));
+      });
+    }
+
+    async function getPendingAttendance() {
+      const db = await openAttendanceDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(ATTENDANCE_STORE, 'readonly');
+        const request = tx.objectStore(ATTENDANCE_STORE).getAll();
+        request.onsuccess = () => resolve((request.result || []).sort((a, b) => a.createdAt - b.createdAt));
+        request.onerror = () => reject(request.error || new Error('Gagal membaca antrean absensi.'));
+      });
+    }
+
+    async function syncPendingAttendanceQueue() {
+      if (isSyncingAttendanceQueue || !googleIdToken || !navigator.onLine) return;
+      isSyncingAttendanceQueue = true;
+      try {
+        const pending = await getPendingAttendance();
+        for (const item of pending) {
+          if (!googleIdToken || !navigator.onLine) break;
+          try {
+            const response = await requestAttendanceWithRetry(item.token, item.requestId);
+            if (!response || !response.success) {
+              throw new Error((response && response.message) || 'Server belum menerima absensi.');
+            }
+            await removePendingAttendance(item.requestId);
+            console.info('ABSENSI ANTREAN BERHASIL DISINKRONKAN:', item.requestId);
+          } catch (error) {
+            console.warn('ANTREAN ABSENSI MASIH MENUNGGU:', item.requestId, error);
+            break; // Jaga urutan MASUK/PULANG; jangan lewati transaksi terlama.
+          }
+        }
+      } catch (error) {
+        console.error('GAGAL MEMERIKSA ANTREAN ABSENSI:', error);
+      } finally {
+        isSyncingAttendanceQueue = false;
+      }
+    }
+
+    window.addEventListener('online', () => {
+      if (googleIdToken) syncPendingAttendanceQueue();
+    });
 
     // =====================================
     // RESET SCANNER
@@ -1010,11 +1101,35 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       );
 
       let attendanceSaved = false;
+      let queuedLocally = false;
       try {
-        // Jangan hentikan scanner sebelum server menyelesaikan pencatatan.
-        // isProcessing mencegah QR yang sama diproses berulang.
-        showMessage('MENCATAT ABSENSI...', 'loading');
+        // Cegah QR yang sama dibuat menjadi transaksi baru ketika transaksi
+        // sebelumnya masih menunggu sinkronisasi.
+        const existingPending = await getPendingAttendance();
+        if (existingPending.some(item => item.token === token)) {
+          showMessage(
+            'QR INI MASIH DALAM ANTREAN.\nAbsensi sebelumnya belum tersinkron ke server. Jangan scan ulang.',
+            'error'
+          );
+          showAttendanceNotification(
+            '⌛ ABSENSI MASIH MENUNGGU',
+            'QR karyawan ini sudah memiliki transaksi yang menunggu server.',
+            'error'
+          );
+          return;
+        }
 
+        // Simpan lebih dahulu ke tablet agar scan tidak hilang saat server timeout.
+        await savePendingAttendance({
+          requestId: requestId,
+          token: token,
+          createdAt: Date.now(),
+          scannedAt: new Date().toISOString(),
+          status: 'PENDING'
+        });
+        queuedLocally = true;
+
+        showMessage('ABSENSI TERSIMPAN DI TABLET.\nMengirim ke server...', 'loading');
         const response = await requestAttendanceWithRetry(token, requestId);
 
         if (!response || !response.success) {
@@ -1033,6 +1148,8 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         }
 
         attendanceSaved = true;
+        await removePendingAttendance(requestId);
+        queuedLocally = false;
         showMessage(
           'ABSENSI BERHASIL!\n\n' +
           'Nama: ' + response.name + '\n' +
@@ -1085,12 +1202,21 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       } catch (error) {
         const failureText = error.message || String(error);
         showMessage(
-          (attendanceSaved ? 'ABSENSI TERCATAT.' : 'ABSENSI GAGAL!') +
-          '\n' + failureText,
-          attendanceSaved ? 'success' : 'error'
+          attendanceSaved
+            ? 'ABSENSI TERCATAT.'
+            : (queuedLocally
+                ? 'ABSENSI TERSIMPAN SEMENTARA DI TABLET.\nAkan dikirim ulang saat server tersedia.\n' + failureText
+                : 'ABSENSI GAGAL DISIMPAN.\n' + failureText),
+          (attendanceSaved || queuedLocally) ? 'success' : 'error'
         );
 
-        if (!attendanceSaved) {
+        if (!attendanceSaved && queuedLocally) {
+          showAttendanceNotification(
+            '⌛ ABSENSI MASUK ANTREAN',
+            'Data tersimpan di tablet dan menunggu server. Jangan scan ulang QR yang sama.',
+            'success'
+          );
+        } else if (!attendanceSaved) {
           showAttendanceNotification('✕ ABSENSI GAGAL', failureText, 'error');
         } else {
           showAttendanceNotification(
