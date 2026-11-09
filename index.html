@@ -309,6 +309,13 @@
       .scanner-panel #reader { margin:10px auto; }
       .scanner-panel #reader video { max-height:340px; object-fit:cover; }
     }
+    .sound-control {
+      width:auto; min-width:150px; margin:0 auto 10px; padding:8px 12px;
+      border:1px solid #cbd5e1; border-radius:999px; background:#f8fafc;
+      color:#334155; font-size:12px; font-weight:700;
+    }
+    .sound-control.off { background:#f1f5f9; color:#64748b; }
+
     @media (max-width: 760px) {
       body { padding: 10px; }
       .main-layout { grid-template-columns: 1fr; gap:12px; margin:10px auto; }
@@ -372,6 +379,8 @@
         Menunggu login Google.
       </div>
 
+      <button type="button" id="soundToggle" class="sound-control" onclick="toggleAttendanceSound()">🔊 SUARA: AKTIF</button>
+
       <button id="startButton" onclick="startScanner()" disabled>
         MULAI SCANNER
       </button>
@@ -407,6 +416,79 @@
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
 
     const OFFICIAL_EMAIL = 'sglobalindojaya@gmail.com';
+
+    // =====================================
+    // NOTIFIKASI SUARA (TIDAK MENAHAN SCANNER)
+    // =====================================
+    const SOUND_SETTING_KEY = 'globalindo_attendance_sound_enabled';
+    let attendanceAudioContext = null;
+    let attendanceSoundEnabled = true;
+    try { attendanceSoundEnabled = localStorage.getItem(SOUND_SETTING_KEY) !== 'false'; } catch (e) {}
+
+    function updateSoundButton() {
+      const button = document.getElementById('soundToggle');
+      if (!button) return;
+      button.textContent = attendanceSoundEnabled ? '🔊 SUARA: AKTIF' : '🔇 SUARA: MATI';
+      button.classList.toggle('off', !attendanceSoundEnabled);
+    }
+
+    function unlockAttendanceAudio() {
+      if (!attendanceSoundEnabled) return;
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+        if (!attendanceAudioContext) attendanceAudioContext = new AudioContextClass();
+        if (attendanceAudioContext.state === 'suspended') {
+          // Dipanggil dari sentuhan tombol MULAI SCANNER agar diizinkan browser.
+          attendanceAudioContext.resume().catch(() => {});
+        }
+      } catch (error) { console.warn('Audio tidak tersedia:', error); }
+    }
+
+    function playAttendanceSound(kind) {
+      if (!attendanceSoundEnabled) return;
+      try {
+        unlockAttendanceAudio();
+        const ctx = attendanceAudioContext;
+        if (!ctx || ctx.state !== 'running') return;
+        const patterns = {
+          queued: [{ f: 880, d: 0.10, gap: 0.00 }],
+          success: [{ f: 880, d: 0.10, gap: 0.04 }, { f: 1175, d: 0.13, gap: 0.00 }],
+          failed: [{ f: 330, d: 0.22, gap: 0.04 }, { f: 220, d: 0.28, gap: 0.00 }],
+          invalid: [{ f: 440, d: 0.07, gap: 0.06 }, { f: 440, d: 0.07, gap: 0.06 }, { f: 440, d: 0.07, gap: 0.00 }]
+        };
+        const notes = patterns[kind] || patterns.queued;
+        let at = ctx.currentTime + 0.015;
+        notes.forEach(note => {
+          const oscillator = ctx.createOscillator();
+          const gain = ctx.createGain();
+          oscillator.type = 'sine';
+          oscillator.frequency.setValueAtTime(note.f, at);
+          gain.gain.setValueAtTime(0.0001, at);
+          gain.gain.exponentialRampToValueAtTime(0.16, at + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, at + note.d);
+          oscillator.connect(gain);
+          gain.connect(ctx.destination);
+          oscillator.start(at);
+          oscillator.stop(at + note.d + 0.015);
+          at += note.d + note.gap;
+        });
+      } catch (error) { console.warn('Gagal memutar notifikasi suara:', error); }
+    }
+
+    function toggleAttendanceSound() {
+      attendanceSoundEnabled = !attendanceSoundEnabled;
+      try { localStorage.setItem(SOUND_SETTING_KEY, String(attendanceSoundEnabled)); } catch (e) {}
+      updateSoundButton();
+      if (attendanceSoundEnabled) {
+        unlockAttendanceAudio();
+        // Bunyi pendek sebagai tes saat tombol diaktifkan.
+        playAttendanceSound('queued');
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', updateSoundButton);
+    updateSoundButton();
 
     // =====================================
     // VARIABEL
@@ -956,6 +1038,8 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       initializeGoogleLogin();
       initializePhotoHistoryReset();
       renderAttendanceQueue();
+      // Bersihkan tampilan BERHASIL yang melewati 12 jam tanpa menghapus GAGAL.
+      setInterval(renderAttendanceQueue, 60 * 1000);
     });
 
     // =====================================
@@ -1049,16 +1133,34 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
 
     const ATTENDANCE_HISTORY_KEY = 'globalindo_attendance_queue_history_v1';
 
+    const ATTENDANCE_SUCCESS_HISTORY_TTL = 12 * 60 * 60 * 1000;
+
     function readAttendanceHistory() {
       try {
         const data = JSON.parse(localStorage.getItem(ATTENDANCE_HISTORY_KEY) || '[]');
-        return Array.isArray(data) ? data : [];
+        if (!Array.isArray(data)) return [];
+        const now = Date.now();
+        // Riwayat BERHASIL hanya ditampilkan maksimal 12 jam.
+        // Riwayat GAGAL tidak ikut terhapus otomatis.
+        const kept = data.filter(item => {
+          if (item.status !== 'SUCCESS') return true;
+          const completedAt = Number(item.completedAt || item.createdAt || 0);
+          return completedAt && (now - completedAt < ATTENDANCE_SUCCESS_HISTORY_TTL);
+        });
+        if (kept.length !== data.length) {
+          localStorage.setItem(ATTENDANCE_HISTORY_KEY, JSON.stringify(kept.slice(-100)));
+        }
+        return kept;
       } catch (e) { return []; }
     }
 
     function writeAttendanceHistory(items) {
-      try { localStorage.setItem(ATTENDANCE_HISTORY_KEY, JSON.stringify(items.slice(-100))); }
-      catch (e) { console.warn('Riwayat antrean tidak dapat disimpan:', e); }
+      try {
+        // Jangan pernah membuang item GAGAL hanya karena batas riwayat.
+        const failed = items.filter(item => item.status === 'FAILED');
+        const others = items.filter(item => item.status !== 'FAILED').slice(-100);
+        localStorage.setItem(ATTENDANCE_HISTORY_KEY, JSON.stringify([...others, ...failed]));
+      } catch (e) { console.warn('Riwayat antrean tidak dapat disimpan:', e); }
     }
 
     function saveAttendanceHistory(item) {
@@ -1098,7 +1200,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         td.textContent = 'Belum ada antrean absensi.'; tr.appendChild(td); body.appendChild(tr);
         return;
       }
-      rows.slice(0,40).forEach(item => {
+      rows.forEach(item => {
         const tr = document.createElement('tr');
         const who = document.createElement('td');
         const name = document.createElement('strong'); name.textContent = item.name || 'Karyawan';
@@ -1123,6 +1225,62 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       });
     }
 
+    // Pengambilan foto dijalankan sebagai pekerjaan terpisah.
+    // Kamera QR hanya dijeda singkat saat kamera depan benar-benar dipakai.
+    const photoCaptureTasks = [];
+    let isPhotoCaptureRunning = false;
+    let photoCameraBusy = false;
+
+    function enqueuePhotoCapture(response, item) {
+      if (!response || !response.requestId) return;
+      if (document.getElementById('photo-' + response.requestId)) return;
+      const queueItem = addPhotoQueueItem(response);
+      updatePhotoState(response.requestId, 'Absensi tercatat. Menunggu kamera foto...', '');
+      photoCaptureTasks.push({ response, item, queueItem });
+      processPhotoCaptureQueue();
+    }
+
+    async function processPhotoCaptureQueue() {
+      if (isPhotoCaptureRunning) return;
+      isPhotoCaptureRunning = true;
+      try {
+        while (photoCaptureTasks.length) {
+          // Beri kesempatan antrean QR berikutnya masuk lebih dahulu.
+          // Kamera depan baru dipakai setelah tidak ada scan baru selama 2,5 detik.
+          while (isProcessing || (Date.now() - lastScanTime < 2500)) {
+            await new Promise(resolve => setTimeout(resolve, 150));
+          }
+          const task = photoCaptureTasks.shift();
+          const response = task.response;
+          const requestId = response.requestId;
+          photoCameraBusy = true;
+          try {
+            if (scanner && scanner.isScanning) await scanner.stop();
+            const imageData = await captureFacePhoto();
+            const preview = document.createElement('img');
+            preview.src = imageData;
+            preview.alt = 'Foto absensi ' + (response.name || '');
+            task.queueItem.insertBefore(preview, task.queueItem.querySelector('.upload-state'));
+            updatePhotoState(requestId, 'Foto siap. Mengirim ke Google Drive...', '');
+            startBackgroundPhotoUpload(imageData, requestId, task.item.token);
+          } catch (photoError) {
+            updatePhotoState(requestId,
+              'Absensi sudah tercatat, tetapi foto gagal diambil: ' + (photoError.message || photoError),
+              'failed');
+            console.error('ERROR AMBIL FOTO:', photoError);
+          } finally {
+            photoCameraBusy = false;
+            if (googleIdToken && (!scanner || !scanner.isScanning)) {
+              try { await startScanner(); }
+              catch (cameraError) { console.warn('Scanner belum aktif kembali:', cameraError); }
+            }
+          }
+        }
+      } finally {
+        isPhotoCaptureRunning = false;
+      }
+    }
+
     async function retryAttendance(requestId) {
       if (!googleIdToken) { showMessage('Login Google terlebih dahulu untuk mencoba ulang.','error'); return; }
       const pending = await getPendingAttendance();
@@ -1131,19 +1289,24 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       item.status = 'SENDING'; await savePendingAttendance(item);
       saveAttendanceHistory({ requestId, name:item.name || 'Menunggu konfirmasi server',
         activity:item.activity || '-', scannedAt:item.scannedAt, createdAt:item.createdAt, status:'SENDING' });
+      renderAttendanceQueue();
       try {
         const response = await requestAttendanceWithRetry(item.token,item.requestId);
         if (!response || !response.success) throw new Error((response && response.message) || 'Server belum menerima absensi.');
         await removePendingAttendance(requestId);
-        saveAttendanceHistory({ requestId, name:response.name || item.name, id:response.id || '',
+        response.requestId = response.requestId || requestId;
+        saveAttendanceHistory({ requestId, name:response.name || item.name, id:response.id || response.employeeId || '',
           activity:response.activity || item.activity, time:response.time || '', date:response.date || '',
-          createdAt:item.createdAt, status:'SUCCESS' });
+          createdAt:item.createdAt, completedAt:Date.now(), status:'SUCCESS' });
         showAttendanceNotification('✓ ANTREAN BERHASIL',(response.name || 'Karyawan') + ' sudah tercatat di Spreadsheet.','success');
+        playAttendanceSound('success');
+        enqueuePhotoCapture(response, item);
       } catch(error) {
         item.status = 'FAILED'; item.lastError = error.message || String(error); await savePendingAttendance(item);
         saveAttendanceHistory({ requestId, name:item.name || 'Belum terkonfirmasi', activity:item.activity || '-',
           scannedAt:item.scannedAt, createdAt:item.createdAt, status:'FAILED', message:item.lastError });
         showAttendanceNotification('✕ BELUM BERHASIL',item.lastError,'error');
+        playAttendanceSound('failed');
       }
       renderAttendanceQueue();
     }
@@ -1153,20 +1316,26 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         renderAttendanceQueue(); return;
       }
       isSyncingAttendanceQueue = true;
+      let stoppedOnFailure = false;
       try {
-        const pending = await getPendingAttendance();
+        // Item gagal menunggu tindakan manual melalui tombol Coba lagi.
+        const pending = (await getPendingAttendance()).filter(item => item.status !== 'FAILED');
         for (const item of pending) {
           if (!googleIdToken || !navigator.onLine) break;
           item.status = 'SENDING'; await savePendingAttendance(item);
           saveAttendanceHistory({ requestId:item.requestId, name:item.name || 'Menunggu konfirmasi server',
             activity:item.activity || '-', scannedAt:item.scannedAt, createdAt:item.createdAt, status:'SENDING' });
+          renderAttendanceQueue();
           try {
             const response = await requestAttendanceWithRetry(item.token,item.requestId);
             if (!response || !response.success) throw new Error((response && response.message) || 'Server belum menerima absensi.');
             await removePendingAttendance(item.requestId);
+            response.requestId = response.requestId || item.requestId;
             saveAttendanceHistory({ requestId:item.requestId, name:response.name || item.name,
-              id:response.id || '', activity:response.activity || item.activity, time:response.time || '',
-              date:response.date || '', createdAt:item.createdAt, status:'SUCCESS' });
+              id:response.id || response.employeeId || '', activity:response.activity || item.activity, time:response.time || '',
+              date:response.date || '', createdAt:item.createdAt, completedAt:Date.now(), status:'SUCCESS' });
+            enqueuePhotoCapture(response, item);
+            playAttendanceSound('success');
             console.info('ABSENSI ANTREAN BERHASIL DISINKRONKAN:',item.requestId);
           } catch(error) {
             item.status = 'FAILED'; item.lastError = error.message || String(error);
@@ -1174,12 +1343,26 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
             saveAttendanceHistory({ requestId:item.requestId, name:item.name || 'Belum terkonfirmasi',
               activity:item.activity || '-', scannedAt:item.scannedAt, createdAt:item.createdAt,
               status:'FAILED', message:item.lastError });
-            console.warn('ANTREAN ABSENSI MASIH MENUNGGU:',item.requestId,error);
-            break;
+            showAttendanceNotification('✕ ABSENSI GAGAL', item.lastError, 'error');
+            playAttendanceSound('failed');
+            console.warn('ANTREAN ABSENSI GAGAL:',item.requestId,error);
+            stoppedOnFailure = true;
+            break; // Urutan transaksi dijaga; item gagal perlu diperiksa/dicoba ulang.
           }
         }
       } catch(error) { console.error('GAGAL MEMERIKSA ANTREAN ABSENSI:',error); }
-      finally { isSyncingAttendanceQueue = false; renderAttendanceQueue(); }
+      finally {
+        isSyncingAttendanceQueue = false;
+        renderAttendanceQueue();
+        // Jika ada scan baru masuk ketika sinkronisasi sedang berlangsung, proses setelah batch ini.
+        if (!stoppedOnFailure && navigator.onLine) {
+          getPendingAttendance().then(items => {
+            if (items.some(item => item.status !== 'FAILED')) {
+              setTimeout(() => syncPendingAttendanceQueue(), 150);
+            }
+          }).catch(() => {});
+        }
+      }
     }
 
     window.addEventListener('online', () => {
@@ -1264,11 +1447,8 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       try {
         return await requestAttendanceOnce(token, requestId);
       } catch (firstError) {
-        showMessage(
-          'KONEKSI TERGANGGU.\nMemastikan status absensi ke server...',
-          'loading'
-        );
         // Percobaan kedua memakai ID permintaan yang sama.
+        // Tidak mengubah panel scanner karena proses ini berjalan di latar belakang.
         return await requestAttendanceOnce(token, requestId);
       }
     }
@@ -1284,170 +1464,51 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         return;
       }
 
-      const requestId = (
-        window.crypto && crypto.randomUUID
-          ? crypto.randomUUID()
-          : Date.now() + '_' + Math.random().toString(36).slice(2)
-      );
+      const requestId = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : Date.now() + '_' + Math.random().toString(36).slice(2);
 
-      let attendanceSaved = false;
-      let queuedLocally = false;
       try {
-        // Cegah QR yang sama dibuat menjadi transaksi baru ketika transaksi
-        // sebelumnya masih menunggu sinkronisasi.
         const existingPending = await getPendingAttendance();
         if (existingPending.some(item => item.token === token)) {
-          showMessage(
-            'QR INI MASIH DALAM ANTREAN.\nAbsensi sebelumnya belum tersinkron ke server. Jangan scan ulang.',
-            'error'
-          );
-          showAttendanceNotification(
-            '⌛ ABSENSI MASIH MENUNGGU',
-            'QR karyawan ini sudah memiliki transaksi yang menunggu server.',
-            'error'
-          );
+          showAttendanceNotification('⌛ QR MASIH DALAM ANTREAN',
+            'QR ini sudah memiliki transaksi yang belum selesai. Jangan scan ulang.', 'error');
+          playAttendanceSound('failed');
+          showMessage('QR MASIH DALAM ANTREAN.\nPeriksa Room Chat untuk melihat statusnya.', 'error');
           return;
         }
 
-        // Simpan lebih dahulu ke tablet agar scan tidak hilang saat server timeout.
-        await savePendingAttendance({
-          requestId: requestId,
-          token: token,
-          createdAt: Date.now(),
-          scannedAt: new Date().toISOString(),
-          status: 'SENDING',
-          name: 'Menunggu konfirmasi server',
-          activity: '-'
-        });
-        queuedLocally = true;
-        saveAttendanceHistory({
-          requestId: requestId, name: 'Menunggu konfirmasi server', activity: '-',
-          scannedAt: new Date().toLocaleTimeString('id-ID'), createdAt: Date.now(), status: 'SENDING'
-        });
-
-        showMessage('ABSENSI TERSIMPAN DI TABLET.\nMengirim ke server...', 'loading');
-        const response = await requestAttendanceWithRetry(token, requestId);
-
-        if (!response || !response.success) {
-          const errorMessage = response && response.message
-            ? response.message
-            : 'Respons server tidak valid.';
-
-          if (/login google tidak valid|sesi login google sudah kedaluwarsa|silakan login/i.test(errorMessage)) {
-            googleIdToken = '';
-            startButton.disabled = true;
-            document.getElementById('googleLogin').style.display = 'flex';
-            accountInfo.textContent = 'Sesi login berakhir. Silakan login kembali.';
-            try { sessionStorage.removeItem('absensi_google_id_token'); } catch (storageError) {}
-          }
-          throw new Error(errorMessage);
-        }
-
-        attendanceSaved = true;
-        saveAttendanceHistory({
-          requestId: requestId, name: response.name || 'Karyawan',
-          id: response.id || response.employeeId || '', activity: response.activity || '-',
-          time: response.time || '', date: response.date || '', createdAt: Date.now(), status: 'SUCCESS'
-        });
-        await removePendingAttendance(requestId);
-        queuedLocally = false;
+        // Prioritas pertama: simpan transaksi di tablet.
+        // Setelah IndexedDB mengonfirmasi, scanner boleh menerima QR berikutnya.
+        const queueItem = {
+          requestId, token, createdAt: Date.now(), scannedAt: new Date().toISOString(),
+          status: 'PENDING', name: 'Menunggu konfirmasi server', activity: '-'
+        };
+        await savePendingAttendance(queueItem);
+        saveAttendanceHistory({ requestId, name:'Menunggu konfirmasi server', activity:'-',
+          scannedAt:new Date().toLocaleTimeString('id-ID'), createdAt:queueItem.createdAt, status:'PENDING' });
         renderAttendanceQueue();
-        showMessage(
-          'ABSENSI BERHASIL!\n\n' +
-          'Nama: ' + response.name + '\n' +
-          'Departemen: ' + response.department + '\n' +
-          'Aktivitas: ' + response.activity + '\n' +
-          'Tanggal: ' + response.date + '\n' +
-          'Jam: ' + response.time,
-          'success'
-        );
 
-        showAttendanceNotification(
-          '✓ ABSENSI ' + String(response.activity || 'BERHASIL').toUpperCase(),
-          (response.name || 'Nama karyawan tidak tersedia') +
-            (response.id || response.employeeId ? ' · ' + (response.id || response.employeeId) : '') +
-            '\n' + (response.department || '-') +
-            ' · ' + (response.time || '-') +
-            ' · ' + (response.date || '-'),
-          'success'
-        );
+        showMessage('✓ ABSENSI MASUK ANTREAN\nSilakan scan karyawan berikutnya.', 'success');
+        showAttendanceNotification('✓ BERHASIL MASUK ANTREAN',
+          'Data sudah diamankan di tablet. Konfirmasi Google Spreadsheet sedang berjalan di latar belakang.', 'success');
+        playAttendanceSound('queued');
 
-        response.requestId = response.requestId || requestId;
-        const queueItem = addPhotoQueueItem(response);
-        updatePhotoState(requestId, 'Absensi tercatat. Mengambil foto wajah...', '');
-
-        // Hentikan kamera belakang hanya saat kamera depan akan dipakai.
-        if (scanner && scanner.isScanning) {
-          await scanner.stop();
-        }
-
-        try {
-          const imageData = await captureFacePhoto();
-          const preview = document.createElement('img');
-          preview.src = imageData;
-          preview.alt = 'Foto absensi ' + (response.name || '');
-          queueItem.insertBefore(preview, queueItem.querySelector('.upload-state'));
-
-          updatePhotoState(requestId, 'Foto siap. Mengirim ke Google Drive...', '');
-
-          // Upload berjalan di latar belakang. Tidak ditunggu di sini.
-          startBackgroundPhotoUpload(imageData, requestId, token);
-        } catch (photoError) {
-          updatePhotoState(
-            requestId,
-            'Absensi sudah tercatat, tetapi foto gagal diambil: ' +
-              (photoError.message || photoError),
-            'failed'
-          );
-          console.error('ERROR AMBIL FOTO:', photoError);
-        }
+        // Lepaskan scanner segera; pengiriman server tidak ditunggu.
+        isProcessing = false;
+        await resetScanner();
+        syncPendingAttendanceQueue();
 
       } catch (error) {
         const failureText = error.message || String(error);
-        showMessage(
-          attendanceSaved
-            ? 'ABSENSI TERCATAT.'
-            : (queuedLocally
-                ? 'ABSENSI TERSIMPAN SEMENTARA DI TABLET.\nAkan dikirim ulang saat server tersedia.\n' + failureText
-                : 'ABSENSI GAGAL DISIMPAN.\n' + failureText),
-          (attendanceSaved || queuedLocally) ? 'success' : 'error'
-        );
-
-        if (!attendanceSaved && queuedLocally) {
-          try {
-            const pendingItems = await getPendingAttendance();
-            const pendingItem = pendingItems.find(item => item.requestId === requestId);
-            if (pendingItem) {
-              pendingItem.status = 'FAILED';
-              pendingItem.lastError = failureText;
-              await savePendingAttendance(pendingItem);
-            }
-          } catch (queueError) { console.warn('Gagal memperbarui status antrean:', queueError); }
-          saveAttendanceHistory({
-            requestId: requestId, name: 'Belum terkonfirmasi', activity: '-',
-            createdAt: Date.now(), status: 'FAILED', message: failureText
-          });
-          renderAttendanceQueue();
-          showAttendanceNotification(
-            '⌛ ABSENSI MASUK ANTREAN',
-            'Data tersimpan di tablet dan menunggu server. Jangan scan ulang QR yang sama.',
-            'success'
-          );
-        } else if (!attendanceSaved) {
-          showAttendanceNotification('✕ ABSENSI GAGAL', failureText, 'error');
-        } else {
-          showAttendanceNotification(
-            '✓ ABSENSI TETAP TERCATAT',
-            'Foto belum berhasil diproses. ' + failureText,
-            'success'
-          );
-        }
-
-        console.error('ERROR ABSENSI:', error);
+        showMessage('GAGAL MEMASUKKAN KE ANTREAN\n' + failureText, 'error');
+        showAttendanceNotification('✕ GAGAL MASUK ANTREAN', failureText, 'error');
+        playAttendanceSound('failed');
+        console.error('ERROR ANTREAN ABSENSI:', error);
       } finally {
-        // Scanner dinyalakan kembali setelah kamera depan selesai dipakai.
-        // Upload Drive tetap berjalan terpisah dan tidak ditunggu.
-        await resetScanner();
+        // Pastikan kunci scan dilepas meskipun penyimpanan lokal gagal.
+        isProcessing = false;
+        if (googleIdToken && (!scanner || !scanner.isScanning)) resetScanner();
       }
     }
 
@@ -1458,7 +1519,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     function onScanSuccess(decodedText) {
       const now = Date.now();
 
-      if (isProcessing || now - lastScanTime < 2000) return;
+      if (isProcessing || photoCameraBusy || isCapturingFace || now - lastScanTime < 1200) return;
 
       const token = extractToken(decodedText);
 
@@ -1470,6 +1531,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           'QR tidak dikenali. Silakan gunakan kartu QR karyawan yang benar.',
           'error'
         );
+        playAttendanceSound('invalid');
         return;
       }
 
@@ -1485,6 +1547,8 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     // =====================================
 
     async function startScanner() {
+      // Membuka izin audio dari interaksi tombol pengguna; tidak menunggu bunyi.
+      unlockAttendanceAudio();
       if (!googleIdToken) {
         showMessage('Login Google terlebih dahulu.', 'error');
         return;
