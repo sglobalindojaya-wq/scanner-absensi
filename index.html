@@ -137,11 +137,11 @@
     }
 
     .main-layout {
-      max-width: 1180px;
+      max-width: 1560px;
       margin: 20px auto;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.85fr);
-      gap: 18px;
+      grid-template-columns: minmax(270px, .95fr) minmax(320px, 1.1fr) minmax(270px, .95fr);
+      gap: 14px;
       text-align: left;
       align-items: stretch;
     }
@@ -163,6 +163,36 @@
     .scanner-panel { text-align: center; }
     .scanner-panel #reader { max-width: 520px; }
     .scanner-panel #status { text-align: center; }
+
+    #faceCamera {
+      position: fixed !important; left: -10000px !important; top: 0 !important;
+      width: 320px !important; height: 240px !important; opacity: 0 !important;
+      pointer-events: none !important;
+    }
+    .attendance-queue { display:flex; flex-direction:column; min-height:560px; max-height:760px; padding:0; border:1px solid #e2e8f0; border-radius:16px; background:#fff; text-align:left; overflow:hidden; }
+    .attendance-queue-header { background:#075e54; color:#fff; padding:17px 16px; }
+    .attendance-queue-header h3 { margin:0 0 5px; color:#fff; font-size:16px; }
+    .attendance-queue-header small { opacity:.88; }
+    .attendance-queue-content { padding:12px; overflow-y:auto; flex:1; }
+    .attendance-queue h4 { margin:0 0 10px; color:#0f172a; font-size:14px; }
+    .attendance-counts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px; margin-bottom:12px; }
+    .attendance-count { background:#f1f5f9; border-radius:8px; padding:8px 5px; text-align:center; }
+    .attendance-count strong { display:block; font-size:20px; color:#0f172a; }
+    .attendance-count span { font-size:10px; color:#64748b; }
+    .attendance-table-wrap { overflow-x:auto; }
+    .attendance-table { width:100%; border-collapse:collapse; font-size:11px; table-layout:fixed; }
+    .attendance-table th,.attendance-table td { padding:8px 5px; border-bottom:1px solid #e2e8f0; text-align:left; vertical-align:middle; overflow-wrap:anywhere; }
+    .attendance-table th:nth-child(1) { width:39%; }
+    .attendance-table th:nth-child(2) { width:17%; }
+    .attendance-table th:nth-child(3) { width:29%; }
+    .attendance-table th:nth-child(4) { width:15%; }
+    .attendance-table th { color:#64748b; font-weight:700; }
+    .queue-badge { display:inline-block; border-radius:20px; padding:4px 7px; font-size:10px; font-weight:700; white-space:nowrap; background:#e2e8f0; color:#334155; }
+    .queue-badge.sending { background:#dbeafe; color:#1d4ed8; }
+    .queue-badge.saved { background:#dcfce7; color:#166534; }
+    .queue-badge.failed { background:#fee2e2; color:#991b1b; }
+    .queue-retry { width:auto; padding:5px 8px; border-radius:6px; background:#b5121b; font-size:11px; }
+    .attendance-queue-note { margin:9px 0 0; color:#64748b; font-size:11px; line-height:1.4; }
 
     .chat-panel {
       display: flex;
@@ -262,16 +292,31 @@
       text-align: left;
     }
 
+    /* Tablet landscape: tiga panel selalu sejajar dalam satu layar. */
+    @media (min-width: 761px) and (max-width: 1100px) {
+      body { padding: 8px; }
+      .main-layout { grid-template-columns: minmax(0,.95fr) minmax(0,1.1fr) minmax(0,.95fr); gap:9px; margin:10px auto; }
+      .panel { padding:12px; }
+      .attendance-queue, .chat-panel { min-height:500px; max-height:calc(100vh - 175px); }
+      .attendance-queue-content, #photoQueue { padding:9px; }
+      .attendance-counts { gap:4px; }
+      .attendance-count { padding:7px 3px; }
+      .attendance-count strong { font-size:17px; }
+      .attendance-count span { font-size:9px; }
+      .attendance-table th,.attendance-table td { padding:7px 3px; font-size:10px; }
+      .queue-badge { font-size:9px; padding:3px 5px; }
+      .queue-retry { font-size:9px; padding:5px; }
+      .scanner-panel #reader { margin:10px auto; }
+      .scanner-panel #reader video { max-height:340px; object-fit:cover; }
+    }
     @media (max-width: 760px) {
       body { padding: 10px; }
-      .main-layout {
-        grid-template-columns: 1fr;
-        gap: 12px;
-        margin: 10px auto;
-      }
-      .panel { padding: 15px; }
-      .chat-panel { min-height: 360px; max-height: 520px; }
-      .scanner-panel #reader { margin: 12px auto; }
+      .main-layout { grid-template-columns: 1fr; gap:12px; margin:10px auto; }
+      .panel { padding:15px; }
+      .attendance-queue { min-height:360px; max-height:520px; }
+      .chat-panel { min-height:360px; max-height:520px; }
+      .attendance-table { min-width:0; }
+      .scanner-panel #reader { margin:12px auto; }
     }
 
   </style>
@@ -288,8 +333,35 @@
   </div>
 
   <main class="main-layout">
+    <!-- PANEL 1: ROOM CHAT / ANTREAN DATA ABSENSI -->
+    <section class="attendance-queue">
+      <div class="attendance-queue-header">
+        <h3>ROOM CHAT ANTREAN</h3>
+        <small>Pantau status setiap scan sampai masuk Spreadsheet</small>
+      </div>
+      <div class="attendance-queue-content">
+        <div class="attendance-counts">
+          <div class="attendance-count"><strong id="countPending">0</strong><span>MENUNGGU</span></div>
+          <div class="attendance-count"><strong id="countSuccess">0</strong><span>BERHASIL</span></div>
+          <div class="attendance-count"><strong id="countFailed">0</strong><span>GAGAL</span></div>
+        </div>
+        <div class="attendance-table-wrap">
+          <table class="attendance-table">
+            <thead><tr><th>WAKTU / NAMA</th><th>AKTIVITAS</th><th>STATUS</th><th></th></tr></thead>
+            <tbody id="attendanceQueueRows">
+              <tr><td colspan="4" style="text-align:center;color:#64748b;">Belum ada antrean absensi.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="attendance-queue-note">
+          BERHASIL = sudah dikonfirmasi tersimpan di Google Spreadsheet. MENUNGGU = masih tersimpan di tablet dan belum dikonfirmasi server.
+        </p>
+      </div>
+    </section>
+
+    <!-- PANEL 2: SCANNER QR -->
     <section class="panel scanner-panel">
-      <h3>SCANNER ABSENSI</h3>
+      <h3>SCANNER QR ABSENSI</h3>
       <div id="reader"></div>
 
       <video id="faceCamera" autoplay playsinline muted
@@ -305,6 +377,7 @@
       </button>
     </section>
 
+    <!-- PANEL 3: FOTO YANG DIPROSES DI LATAR BELAKANG -->
     <section class="panel chat-panel">
       <div class="chat-header">
         <strong>PROSES FOTO ABSENSI</strong>
@@ -328,7 +401,7 @@
     // =====================================
 
     const SCRIPT_URL =
-      'https://script.google.com/macros/s/AKfycbwQmv_7h187LGafj70ivGWXmgxWfWm0nK2-_guqFV3WUH8uAV1uYNR7Et0jiJGjI3Mt/exec';
+      'https://script.google.com/macros/s/AKfycbzIWTqScIN4fWlx6ikkCvG0m67NMfGLQrvp3f63pNnnFwcQupf6JrpSbePyOr6dElrX/exec';
 
     const GOOGLE_CLIENT_ID =
       '373449956803-0d4oljbn26l1esnfkm427k0dj8t4hcq3.apps.googleusercontent.com';
@@ -467,6 +540,13 @@ async function captureFacePhoto() {
 
       checkCamera();
     });
+
+    // Beri waktu sensor depan menyesuaikan exposure, fokus, dan white balance.
+    // Ini mencegah frame awal yang masih putih/gelap tertangkap sebagai foto.
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    await new Promise(resolve => requestAnimationFrame(() =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    ));
 
     showMessage('MENGAMBIL FOTO WAJAH...', 'loading');
 
@@ -875,6 +955,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     window.addEventListener('load', () => {
       initializeGoogleLogin();
       initializePhotoHistoryReset();
+      renderAttendanceQueue();
     });
 
     // =====================================
@@ -966,30 +1047,139 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       });
     }
 
+    const ATTENDANCE_HISTORY_KEY = 'globalindo_attendance_queue_history_v1';
+
+    function readAttendanceHistory() {
+      try {
+        const data = JSON.parse(localStorage.getItem(ATTENDANCE_HISTORY_KEY) || '[]');
+        return Array.isArray(data) ? data : [];
+      } catch (e) { return []; }
+    }
+
+    function writeAttendanceHistory(items) {
+      try { localStorage.setItem(ATTENDANCE_HISTORY_KEY, JSON.stringify(items.slice(-100))); }
+      catch (e) { console.warn('Riwayat antrean tidak dapat disimpan:', e); }
+    }
+
+    function saveAttendanceHistory(item) {
+      const items = readAttendanceHistory();
+      const index = items.findIndex(x => x.requestId === item.requestId);
+      if (index >= 0) items[index] = { ...items[index], ...item };
+      else items.push(item);
+      writeAttendanceHistory(items);
+      renderAttendanceQueue();
+    }
+
+    async function renderAttendanceQueue() {
+      const body = document.getElementById('attendanceQueueRows');
+      if (!body) return;
+      let pending = [];
+      try { pending = await getPendingAttendance(); } catch (e) {}
+      const history = readAttendanceHistory();
+      const pendingIds = new Set(pending.map(x => x.requestId));
+      const rows = [
+        ...pending.map(item => ({ ...item, status: item.status || 'PENDING',
+          name: item.name || 'Menunggu konfirmasi server', activity: item.activity || '-' })),
+        ...history.filter(item => !pendingIds.has(item.requestId))
+      ].sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+      const waitingCount = pending.filter(x => x.status !== 'FAILED').length;
+      const successCount = history.filter(x => x.status === 'SUCCESS' && !pendingIds.has(x.requestId)).length;
+      const failedCount = pending.filter(x => x.status === 'FAILED').length +
+        history.filter(x => x.status === 'FAILED' && !pendingIds.has(x.requestId)).length;
+      document.getElementById('countPending').textContent = waitingCount;
+      document.getElementById('countSuccess').textContent = successCount;
+      document.getElementById('countFailed').textContent = failedCount;
+
+      body.replaceChildren();
+      if (!rows.length) {
+        const tr = document.createElement('tr'), td = document.createElement('td');
+        td.colSpan = 4; td.style.textAlign = 'center'; td.style.color = '#64748b';
+        td.textContent = 'Belum ada antrean absensi.'; tr.appendChild(td); body.appendChild(tr);
+        return;
+      }
+      rows.slice(0,40).forEach(item => {
+        const tr = document.createElement('tr');
+        const who = document.createElement('td');
+        const name = document.createElement('strong'); name.textContent = item.name || 'Karyawan';
+        const time = document.createElement('div'); time.style.color = '#64748b'; time.style.fontSize = '10px';
+        time.textContent = (item.time || item.scannedAt || '-') + (item.date ? ' · ' + item.date : '');
+        who.append(name,time);
+        const activity = document.createElement('td'); activity.textContent = item.activity || '-';
+        const statusCell = document.createElement('td'), badge = document.createElement('span');
+        badge.className = 'queue-badge';
+        if (item.status === 'SUCCESS') { badge.classList.add('saved'); badge.textContent = '✓ TERSIMPAN'; }
+        else if (item.status === 'FAILED') { badge.classList.add('failed'); badge.textContent = '✕ GAGAL'; }
+        else { badge.classList.add('sending'); badge.textContent = item.status === 'SENDING' ? 'DIPROSES' : 'MENUNGGU'; }
+        statusCell.appendChild(badge);
+        const actionCell = document.createElement('td');
+        if (pendingIds.has(item.requestId)) {
+          const retry = document.createElement('button'); retry.className = 'queue-retry';
+          retry.type = 'button'; retry.textContent = 'Coba lagi';
+          retry.addEventListener('click', () => retryAttendance(item.requestId));
+          actionCell.appendChild(retry);
+        }
+        tr.append(who,activity,statusCell,actionCell); body.appendChild(tr);
+      });
+    }
+
+    async function retryAttendance(requestId) {
+      if (!googleIdToken) { showMessage('Login Google terlebih dahulu untuk mencoba ulang.','error'); return; }
+      const pending = await getPendingAttendance();
+      const item = pending.find(x => x.requestId === requestId);
+      if (!item) return;
+      item.status = 'SENDING'; await savePendingAttendance(item);
+      saveAttendanceHistory({ requestId, name:item.name || 'Menunggu konfirmasi server',
+        activity:item.activity || '-', scannedAt:item.scannedAt, createdAt:item.createdAt, status:'SENDING' });
+      try {
+        const response = await requestAttendanceWithRetry(item.token,item.requestId);
+        if (!response || !response.success) throw new Error((response && response.message) || 'Server belum menerima absensi.');
+        await removePendingAttendance(requestId);
+        saveAttendanceHistory({ requestId, name:response.name || item.name, id:response.id || '',
+          activity:response.activity || item.activity, time:response.time || '', date:response.date || '',
+          createdAt:item.createdAt, status:'SUCCESS' });
+        showAttendanceNotification('✓ ANTREAN BERHASIL',(response.name || 'Karyawan') + ' sudah tercatat di Spreadsheet.','success');
+      } catch(error) {
+        item.status = 'FAILED'; item.lastError = error.message || String(error); await savePendingAttendance(item);
+        saveAttendanceHistory({ requestId, name:item.name || 'Belum terkonfirmasi', activity:item.activity || '-',
+          scannedAt:item.scannedAt, createdAt:item.createdAt, status:'FAILED', message:item.lastError });
+        showAttendanceNotification('✕ BELUM BERHASIL',item.lastError,'error');
+      }
+      renderAttendanceQueue();
+    }
+
     async function syncPendingAttendanceQueue() {
-      if (isSyncingAttendanceQueue || !googleIdToken || !navigator.onLine) return;
+      if (isSyncingAttendanceQueue || !googleIdToken || !navigator.onLine) {
+        renderAttendanceQueue(); return;
+      }
       isSyncingAttendanceQueue = true;
       try {
         const pending = await getPendingAttendance();
         for (const item of pending) {
           if (!googleIdToken || !navigator.onLine) break;
+          item.status = 'SENDING'; await savePendingAttendance(item);
+          saveAttendanceHistory({ requestId:item.requestId, name:item.name || 'Menunggu konfirmasi server',
+            activity:item.activity || '-', scannedAt:item.scannedAt, createdAt:item.createdAt, status:'SENDING' });
           try {
-            const response = await requestAttendanceWithRetry(item.token, item.requestId);
-            if (!response || !response.success) {
-              throw new Error((response && response.message) || 'Server belum menerima absensi.');
-            }
+            const response = await requestAttendanceWithRetry(item.token,item.requestId);
+            if (!response || !response.success) throw new Error((response && response.message) || 'Server belum menerima absensi.');
             await removePendingAttendance(item.requestId);
-            console.info('ABSENSI ANTREAN BERHASIL DISINKRONKAN:', item.requestId);
-          } catch (error) {
-            console.warn('ANTREAN ABSENSI MASIH MENUNGGU:', item.requestId, error);
-            break; // Jaga urutan MASUK/PULANG; jangan lewati transaksi terlama.
+            saveAttendanceHistory({ requestId:item.requestId, name:response.name || item.name,
+              id:response.id || '', activity:response.activity || item.activity, time:response.time || '',
+              date:response.date || '', createdAt:item.createdAt, status:'SUCCESS' });
+            console.info('ABSENSI ANTREAN BERHASIL DISINKRONKAN:',item.requestId);
+          } catch(error) {
+            item.status = 'FAILED'; item.lastError = error.message || String(error);
+            await savePendingAttendance(item);
+            saveAttendanceHistory({ requestId:item.requestId, name:item.name || 'Belum terkonfirmasi',
+              activity:item.activity || '-', scannedAt:item.scannedAt, createdAt:item.createdAt,
+              status:'FAILED', message:item.lastError });
+            console.warn('ANTREAN ABSENSI MASIH MENUNGGU:',item.requestId,error);
+            break;
           }
         }
-      } catch (error) {
-        console.error('GAGAL MEMERIKSA ANTREAN ABSENSI:', error);
-      } finally {
-        isSyncingAttendanceQueue = false;
-      }
+      } catch(error) { console.error('GAGAL MEMERIKSA ANTREAN ABSENSI:',error); }
+      finally { isSyncingAttendanceQueue = false; renderAttendanceQueue(); }
     }
 
     window.addEventListener('online', () => {
@@ -1125,9 +1315,15 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           token: token,
           createdAt: Date.now(),
           scannedAt: new Date().toISOString(),
-          status: 'PENDING'
+          status: 'SENDING',
+          name: 'Menunggu konfirmasi server',
+          activity: '-'
         });
         queuedLocally = true;
+        saveAttendanceHistory({
+          requestId: requestId, name: 'Menunggu konfirmasi server', activity: '-',
+          scannedAt: new Date().toLocaleTimeString('id-ID'), createdAt: Date.now(), status: 'SENDING'
+        });
 
         showMessage('ABSENSI TERSIMPAN DI TABLET.\nMengirim ke server...', 'loading');
         const response = await requestAttendanceWithRetry(token, requestId);
@@ -1148,8 +1344,14 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         }
 
         attendanceSaved = true;
+        saveAttendanceHistory({
+          requestId: requestId, name: response.name || 'Karyawan',
+          id: response.id || response.employeeId || '', activity: response.activity || '-',
+          time: response.time || '', date: response.date || '', createdAt: Date.now(), status: 'SUCCESS'
+        });
         await removePendingAttendance(requestId);
         queuedLocally = false;
+        renderAttendanceQueue();
         showMessage(
           'ABSENSI BERHASIL!\n\n' +
           'Nama: ' + response.name + '\n' +
@@ -1170,6 +1372,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           'success'
         );
 
+        response.requestId = response.requestId || requestId;
         const queueItem = addPhotoQueueItem(response);
         updatePhotoState(requestId, 'Absensi tercatat. Mengambil foto wajah...', '');
 
@@ -1211,6 +1414,20 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         );
 
         if (!attendanceSaved && queuedLocally) {
+          try {
+            const pendingItems = await getPendingAttendance();
+            const pendingItem = pendingItems.find(item => item.requestId === requestId);
+            if (pendingItem) {
+              pendingItem.status = 'FAILED';
+              pendingItem.lastError = failureText;
+              await savePendingAttendance(pendingItem);
+            }
+          } catch (queueError) { console.warn('Gagal memperbarui status antrean:', queueError); }
+          saveAttendanceHistory({
+            requestId: requestId, name: 'Belum terkonfirmasi', activity: '-',
+            createdAt: Date.now(), status: 'FAILED', message: failureText
+          });
+          renderAttendanceQueue();
           showAttendanceNotification(
             '⌛ ABSENSI MASUK ANTREAN',
             'Data tersimpan di tablet dan menunggu server. Jangan scan ulang QR yang sama.',
