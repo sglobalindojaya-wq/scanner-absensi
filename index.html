@@ -282,6 +282,17 @@
 
     .chat-message .upload-state.done { color: #087443; }
     .chat-message .upload-state.failed { color: #b91c1c; }
+    .chat-message .photo-retry {
+      display: block;
+      width: auto;
+      margin: 9px 0 0 auto;
+      padding: 7px 11px;
+      border-radius: 7px;
+      background: #b5121b;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+    }
 
     .queue-summary {
       padding: 10px 14px;
@@ -530,43 +541,34 @@ function ensureQueueEmptyMessage() {
   }
 }
 
-function resetCompletedPhotoHistory() {
-  const queue = document.getElementById('photoQueue');
-  if (!queue) return;
+async function resetCompletedPhotoHistory() {
+  // Hapus hanya foto BERHASIL yang sudah berumur minimal satu jam.
+  // Foto GAGAL, menunggu, dan sedang diproses tetap disimpan.
+  try {
+    const tasks = await getPhotoTasks();
+    const now = Date.now();
 
-  // Pesan aktif (mengambil foto/mengunggah/mencoba ulang) dipertahankan.
-  queue.querySelectorAll('.chat-message').forEach(item => {
-    const state = item.querySelector('.upload-state');
-    if (state && state.classList.contains('done')) {
-      item.remove();
+    for (const task of tasks) {
+      if (task.status === 'DONE' &&
+          task.completedAt &&
+          now - Number(task.completedAt) >= PHOTO_HISTORY_INTERVAL) {
+        await deletePhotoTask(task.requestId);
+        const card = document.getElementById('photo-' + task.requestId);
+        if (card) card.remove();
+      }
     }
-  });
+  } catch (error) {
+    console.warn('Gagal membersihkan riwayat foto:', error);
+  }
 
-  localStorage.setItem(PHOTO_HISTORY_RESET_KEY, String(Date.now()));
   ensureQueueEmptyMessage();
   updateQueueSummary();
 }
 
 function initializePhotoHistoryReset() {
-  let lastReset = 0;
-  try {
-    lastReset = Number(localStorage.getItem(PHOTO_HISTORY_RESET_KEY) || 0);
-  } catch (e) {}
-
-  if (!lastReset) {
-    try { localStorage.setItem(PHOTO_HISTORY_RESET_KEY, String(Date.now())); } catch (e) {}
-  } else if (Date.now() - lastReset >= PHOTO_HISTORY_INTERVAL) {
-    resetCompletedPhotoHistory();
-  }
-
-  // Pemeriksaan setiap menit agar reset tetap terjadi saat halaman terbuka.
-  setInterval(() => {
-    let saved = 0;
-    try { saved = Number(localStorage.getItem(PHOTO_HISTORY_RESET_KEY) || 0); } catch (e) {}
-    if (!saved || Date.now() - saved >= PHOTO_HISTORY_INTERVAL) {
-      resetCompletedPhotoHistory();
-    }
-  }, 60 * 1000);
+  // Pemeriksaan berdasarkan waktu sukses masing-masing foto.
+  resetCompletedPhotoHistory();
+  setInterval(resetCompletedPhotoHistory, 60 * 1000);
 }
 
 async function captureFacePhoto() {
@@ -792,60 +794,126 @@ function submitPhotoInBackground(imageData, requestId, token) {
 async function runPhotoUpload(imageData, requestId, token, attempt) {
   if (activePhotoUploads.has(requestId)) return;
   activePhotoUploads.add(requestId);
-  let uploadElements;
+
+  let lastError = null;
+
   try {
     const tasks = await getPhotoTasks();
     const task = tasks.find(x => x.requestId === requestId);
     if (!task || !task.serverReady || !imageData) return;
-    updatePhotoState(requestId,
-      attempt === 1 ? 'Mengunggah foto ke Google Drive...' :
-        'Mencoba upload ulang (' + attempt + '/3)...', '');
 
-    uploadElements = submitPhotoInBackground(imageData, requestId, token);
-    for (let check = 0; check < 12; check++) {
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      let result;
-      try { result = await checkPhotoStatus(requestId, token); }
-      catch (statusError) { continue; }
+    const card = document.getElementById('photo-' + requestId);
+    const retryButton = card && card.querySelector('.photo-retry');
+    if (retryButton) retryButton.remove();
 
-      if (result && result.success) {
-        task.status = 'DONE';
-        task.completedAt = Date.now();
-        task.imageData = '';
-        task.lastError = '';
-        await savePhotoTask(task);
-        updatePhotoState(requestId, '✓ Foto berhasil tersimpan di Google Drive.', 'done');
-        const card = document.getElementById('photo-' + requestId);
-        const retry = card && card.querySelector('.photo-retry');
-        if (retry) retry.remove();
-        return;
+    if (!navigator.onLine) {
+      throw new Error('Koneksi internet terputus. Foto tetap tersimpan di tablet.');
+    }
+
+    // Tiga percobaan otomatis. Jika tetap gagal, foto tetap di IndexedDB
+    // dan pengguna dapat mengirim ulang melalui tombol pada kartu foto.
+    for (let currentAttempt = 1; currentAttempt <= 3; currentAttempt++) {
+      let uploadElements = null;
+
+      try {
+        if (!navigator.onLine) {
+          throw new Error('Koneksi internet terputus. Foto tetap tersimpan di tablet.');
+        }
+
+        updatePhotoState(
+          requestId,
+          currentAttempt === 1
+            ? 'Mengunggah foto ke Google Drive...'
+            : 'Mencoba upload ulang (' + currentAttempt + '/3)...',
+          ''
+        );
+
+        uploadElements = submitPhotoInBackground(imageData, requestId, token);
+
+        for (let check = 0; check < 12; check++) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          if (!navigator.onLine) {
+            throw new Error('Koneksi internet terputus. Foto tetap tersimpan di tablet.');
+          }
+
+          let result;
+          try {
+            result = await checkPhotoStatus(requestId, token);
+          } catch (statusError) {
+            continue;
+          }
+
+          if (result && result.success) {
+            task.status = 'DONE';
+            task.completedAt = Date.now();
+            task.imageData = '';
+            task.lastError = '';
+            await savePhotoTask(task);
+            updatePhotoState(requestId, '✓ Foto berhasil tersimpan di Google Drive.', 'done');
+
+            const successCard = document.getElementById('photo-' + requestId);
+            const button = successCard && successCard.querySelector('.photo-retry');
+            if (button) button.remove();
+            return;
+          }
+
+          if (result && result.message &&
+              result.message !== 'Foto belum tersimpan.') {
+            throw new Error(result.message);
+          }
+        }
+
+        throw new Error('Belum ada konfirmasi dari Google Drive.');
+      } catch (error) {
+        lastError = error;
+      } finally {
+        if (uploadElements) {
+          uploadElements.form.remove();
+          uploadElements.iframe.remove();
+        }
       }
-      if (result && result.message && result.message !== 'Foto belum tersimpan.') {
-        throw new Error(result.message);
+
+      if (currentAttempt < 3 && navigator.onLine) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } else {
+        break;
       }
     }
-    throw new Error('Belum ada konfirmasi dari Google Drive.');
+
+    const latestTasks = await getPhotoTasks().catch(() => []);
+    const latestTask = latestTasks.find(x => x.requestId === requestId);
+    if (latestTask) {
+      latestTask.status = 'FAILED';
+      latestTask.lastError = lastError
+        ? (lastError.message || String(lastError))
+        : 'Upload foto belum berhasil.';
+      // imageData tetap disimpan agar dapat dicoba ulang.
+      await savePhotoTask(latestTask);
+    }
+
+    const errorMessage = latestTask && latestTask.lastError
+      ? latestTask.lastError
+      : 'Periksa koneksi dan folder Google Drive.';
+    updatePhotoState(requestId, '✕ Upload gagal: ' + errorMessage, 'failed');
+    addPhotoRetryButton(requestId, 'upload');
+
   } catch (error) {
-    if (attempt < 3 && navigator.onLine) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      activePhotoUploads.delete(requestId);
-      return runPhotoUpload(imageData, requestId, token, attempt + 1);
+    const latestTasks = await getPhotoTasks().catch(() => []);
+    const latestTask = latestTasks.find(x => x.requestId === requestId);
+    if (latestTask) {
+      latestTask.status = 'FAILED';
+      latestTask.lastError = error.message || String(error);
+      await savePhotoTask(latestTask);
     }
-    const tasks = await getPhotoTasks().catch(() => []);
-    const task = tasks.find(x => x.requestId === requestId);
-    if (task) {
-      task.status = 'FAILED';
-      task.lastError = error.message || 'Periksa koneksi dan folder Drive.';
-      await savePhotoTask(task);
-    }
-    updatePhotoState(requestId, '✕ Upload gagal: ' +
-      (error.message || 'Periksa koneksi dan folder Drive.'), 'failed');
+
+    updatePhotoState(
+      requestId,
+      '✕ Upload gagal: ' + (error.message || 'Periksa koneksi internet.'),
+      'failed'
+    );
     addPhotoRetryButton(requestId, 'upload');
   } finally {
-    if (uploadElements) {
-      uploadElements.form.remove();
-      uploadElements.iframe.remove();
-    }
     activePhotoUploads.delete(requestId);
   }
 }
@@ -1408,6 +1476,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         task.status = 'PHOTO_SAVED';
         task.lastError = '';
         await savePhotoTask(task);
+        updatePhotoState(requestId, 'Mencoba mengunggah foto kembali...', '');
         startBackgroundPhotoUpload(task.imageData, requestId, task.token);
       }
     }
