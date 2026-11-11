@@ -516,7 +516,7 @@
 // Upload yang masih berjalan tidak pernah dihapus.
 // =====================================
 const PHOTO_HISTORY_RESET_KEY = 'absensi_photo_history_reset_at';
-const PHOTO_HISTORY_INTERVAL = 12 * 60 * 60 * 1000;
+const PHOTO_HISTORY_INTERVAL = 60 * 60 * 1000;
 
 function ensureQueueEmptyMessage() {
   const queue = document.getElementById('photoQueue');
@@ -537,8 +537,7 @@ function resetCompletedPhotoHistory() {
   // Pesan aktif (mengambil foto/mengunggah/mencoba ulang) dipertahankan.
   queue.querySelectorAll('.chat-message').forEach(item => {
     const state = item.querySelector('.upload-state');
-    if (state && (state.classList.contains('done') ||
-                  state.classList.contains('failed'))) {
+    if (state && state.classList.contains('done')) {
       item.remove();
     }
   });
@@ -791,83 +790,71 @@ function submitPhotoInBackground(imageData, requestId, token) {
 }
 
 async function runPhotoUpload(imageData, requestId, token, attempt) {
-  const maxAttempts = 3;
-  updatePhotoState(
-    requestId,
-    attempt === 1
-      ? 'Mengunggah foto...'
-      : 'Mencoba mengirim ulang (' + attempt + '/' + maxAttempts + ')...',
-    ''
-  );
-
+  if (activePhotoUploads.has(requestId)) return;
+  activePhotoUploads.add(requestId);
   let uploadElements;
   try {
-    uploadElements = submitPhotoInBackground(
-      imageData,
-      requestId,
-      token
-    );
+    const tasks = await getPhotoTasks();
+    const task = tasks.find(x => x.requestId === requestId);
+    if (!task || !task.serverReady || !imageData) return;
+    updatePhotoState(requestId,
+      attempt === 1 ? 'Mengunggah foto ke Google Drive...' :
+        'Mencoba upload ulang (' + attempt + '/3)...', '');
 
-    // Polling berjalan sendiri; tidak ditunggu oleh scanner.
+    uploadElements = submitPhotoInBackground(imageData, requestId, token);
     for (let check = 0; check < 12; check++) {
       await new Promise(resolve => setTimeout(resolve, 3000));
-
       let result;
-      try {
-        result = await checkPhotoStatus(requestId, token);
-      } catch (statusError) {
-        // Gangguan sesaat saat mengecek status tidak langsung
-        // dianggap gagal; lanjutkan pemeriksaan.
-        continue;
-      }
+      try { result = await checkPhotoStatus(requestId, token); }
+      catch (statusError) { continue; }
 
       if (result && result.success) {
+        task.status = 'DONE';
+        task.completedAt = Date.now();
+        task.imageData = '';
+        task.lastError = '';
+        await savePhotoTask(task);
         updatePhotoState(requestId, '✓ Foto berhasil tersimpan di Google Drive.', 'done');
+        const card = document.getElementById('photo-' + requestId);
+        const retry = card && card.querySelector('.photo-retry');
+        if (retry) retry.remove();
         return;
       }
-
-      if (
-        result &&
-        result.message &&
-        result.message !== 'Foto belum tersimpan.'
-      ) {
+      if (result && result.message && result.message !== 'Foto belum tersimpan.') {
         throw new Error(result.message);
       }
     }
-
     throw new Error('Belum ada konfirmasi dari Google Drive.');
   } catch (error) {
-    if (attempt < maxAttempts) {
-      updatePhotoState(
-        requestId,
-        'Upload belum berhasil. Sistem akan mencoba ulang...',
-        ''
-      );
+    if (attempt < 3 && navigator.onLine) {
       await new Promise(resolve => setTimeout(resolve, 2000));
+      activePhotoUploads.delete(requestId);
       return runPhotoUpload(imageData, requestId, token, attempt + 1);
     }
-
-    updatePhotoState(
-      requestId,
-      '✕ Gagal mengunggah setelah 3 percobaan: ' +
-        (error.message || 'Periksa koneksi dan folder Drive.'),
-      'failed'
-    );
+    const tasks = await getPhotoTasks().catch(() => []);
+    const task = tasks.find(x => x.requestId === requestId);
+    if (task) {
+      task.status = 'FAILED';
+      task.lastError = error.message || 'Periksa koneksi dan folder Drive.';
+      await savePhotoTask(task);
+    }
+    updatePhotoState(requestId, '✕ Upload gagal: ' +
+      (error.message || 'Periksa koneksi dan folder Drive.'), 'failed');
+    addPhotoRetryButton(requestId, 'upload');
   } finally {
     if (uploadElements) {
       uploadElements.form.remove();
       uploadElements.iframe.remove();
     }
+    activePhotoUploads.delete(requestId);
   }
 }
 
 function startBackgroundPhotoUpload(imageData, requestId, token) {
-  // Sengaja tidak menggunakan await. Proses upload tidak menahan scanner.
   runPhotoUpload(imageData, requestId, token, 1);
 }
 
 
-// =====================================
 // TAMPILAN STATUS
     // =====================================
 
@@ -986,6 +973,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         'success'
       );
       syncPendingAttendanceQueue();
+      restorePhotoTasks();
     }
 
     function restoreGoogleSession() {
@@ -1032,13 +1020,15 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         'success'
       );
       syncPendingAttendanceQueue();
+      restorePhotoTasks();
     }
 
     window.addEventListener('load', () => {
       initializeGoogleLogin();
       initializePhotoHistoryReset();
       renderAttendanceQueue();
-      // Bersihkan tampilan BERHASIL yang melewati 12 jam tanpa menghapus GAGAL.
+      restorePhotoTasks();
+      // Bersihkan tampilan BERHASIL yang melewati 1 jam tanpa menghapus GAGAL.
       setInterval(renderAttendanceQueue, 60 * 1000);
     });
 
@@ -1077,6 +1067,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     // =====================================
     const ATTENDANCE_DB_NAME = 'GLOBALINDO_ABSENSI_DB';
     const ATTENDANCE_STORE = 'pending_attendance';
+    const PHOTO_TASK_STORE = 'photo_tasks';
     let attendanceDbPromise = null;
     let isSyncingAttendanceQueue = false;
 
@@ -1087,11 +1078,15 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           reject(new Error('Browser tidak mendukung penyimpanan antrean lokal.'));
           return;
         }
-        const request = indexedDB.open(ATTENDANCE_DB_NAME, 1);
+        // Versi 2 menambahkan penyimpanan foto tanpa menghapus antrean lama.
+        const request = indexedDB.open(ATTENDANCE_DB_NAME, 2);
         request.onupgradeneeded = event => {
           const db = event.target.result;
           if (!db.objectStoreNames.contains(ATTENDANCE_STORE)) {
             db.createObjectStore(ATTENDANCE_STORE, { keyPath: 'requestId' });
+          }
+          if (!db.objectStoreNames.contains(PHOTO_TASK_STORE)) {
+            db.createObjectStore(PHOTO_TASK_STORE, { keyPath: 'requestId' });
           }
         };
         request.onsuccess = () => resolve(request.result);
@@ -1131,16 +1126,47 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       });
     }
 
+    async function savePhotoTask(task) {
+      const db = await openAttendanceDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(PHOTO_TASK_STORE, 'readwrite');
+        tx.objectStore(PHOTO_TASK_STORE).put(task);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error || new Error('Gagal menyimpan foto di tablet.'));
+        tx.onabort = () => reject(tx.error || new Error('Penyimpanan foto dibatalkan.'));
+      });
+    }
+
+    async function getPhotoTasks() {
+      const db = await openAttendanceDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(PHOTO_TASK_STORE, 'readonly');
+        const request = tx.objectStore(PHOTO_TASK_STORE).getAll();
+        request.onsuccess = () => resolve((request.result || []).sort((a,b) => a.createdAt - b.createdAt));
+        request.onerror = () => reject(request.error || new Error('Gagal membaca antrean foto.'));
+      });
+    }
+
+    async function deletePhotoTask(requestId) {
+      const db = await openAttendanceDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(PHOTO_TASK_STORE, 'readwrite');
+        tx.objectStore(PHOTO_TASK_STORE).delete(requestId);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error || new Error('Gagal membersihkan riwayat foto.'));
+      });
+    }
+
     const ATTENDANCE_HISTORY_KEY = 'globalindo_attendance_queue_history_v1';
 
-    const ATTENDANCE_SUCCESS_HISTORY_TTL = 12 * 60 * 60 * 1000;
+    const ATTENDANCE_SUCCESS_HISTORY_TTL = 60 * 60 * 1000;
 
     function readAttendanceHistory() {
       try {
         const data = JSON.parse(localStorage.getItem(ATTENDANCE_HISTORY_KEY) || '[]');
         if (!Array.isArray(data)) return [];
         const now = Date.now();
-        // Riwayat BERHASIL hanya ditampilkan maksimal 12 jam.
+        // Riwayat BERHASIL hanya ditampilkan maksimal 1 jam.
         // Riwayat GAGAL tidak ikut terhapus otomatis.
         const kept = data.filter(item => {
           if (item.status !== 'SUCCESS') return true;
@@ -1225,19 +1251,80 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       });
     }
 
-    // Pengambilan foto dijalankan sebagai pekerjaan terpisah.
-    // Kamera QR hanya dijeda singkat saat kamera depan benar-benar dipakai.
+    // Foto dibuat segera setelah transaksi aman tersimpan di IndexedDB.
+    // File foto tetap berada di tablet sampai server mengonfirmasi upload.
     const photoCaptureTasks = [];
     let isPhotoCaptureRunning = false;
     let photoCameraBusy = false;
+    const activePhotoUploads = new Set();
 
-    function enqueuePhotoCapture(response, item) {
+    async function enqueuePhotoCapture(response, item) {
       if (!response || !response.requestId) return;
-      if (document.getElementById('photo-' + response.requestId)) return;
-      const queueItem = addPhotoQueueItem(response);
-      updatePhotoState(response.requestId, 'Absensi tercatat. Menunggu kamera foto...', '');
-      photoCaptureTasks.push({ response, item, queueItem });
+      const requestId = response.requestId;
+      let task = (await getPhotoTasks()).find(x => x.requestId === requestId);
+      if (!task) {
+        task = {
+          requestId,
+          token: item.token,
+          createdAt: item.createdAt || Date.now(),
+          name: response.name || item.name || 'Menunggu konfirmasi server',
+          activity: response.activity || item.activity || '-',
+          time: response.time || '',
+          date: response.date || '',
+          imageData: '',
+          serverReady: false,
+          status: 'CAPTURING'
+        };
+        await savePhotoTask(task);
+      }
+      let queueItem = document.getElementById('photo-' + requestId);
+      if (!queueItem) queueItem = addPhotoQueueItem(task);
+      if (!task.imageData && !photoCaptureTasks.some(x => x.requestId === requestId)) {
+        photoCaptureTasks.push({ requestId, response: task, item: { token: task.token }, queueItem });
+      } else if (task.imageData) {
+        showPhotoPreview(queueItem, task.imageData);
+        updatePhotoState(requestId,
+          task.serverReady ? 'Foto tersimpan di tablet. Menunggu upload...' : 'Foto tersimpan di tablet. Menunggu konfirmasi absensi...',
+          '');
+        if (task.serverReady) startBackgroundPhotoUpload(task.imageData, requestId, task.token);
+      }
       processPhotoCaptureQueue();
+    }
+
+    function showPhotoPreview(queueItem, imageData) {
+      if (!queueItem || queueItem.querySelector('img')) return;
+      const preview = document.createElement('img');
+      preview.src = imageData;
+      preview.alt = 'Foto absensi';
+      queueItem.insertBefore(preview, queueItem.querySelector('.upload-state'));
+    }
+
+    async function markPhotoServerReady(response, item) {
+      const requestId = response.requestId || item.requestId;
+      const tasks = await getPhotoTasks();
+      let task = tasks.find(x => x.requestId === requestId);
+      if (!task) {
+        task = {
+          requestId, token: item.token, createdAt: item.createdAt || Date.now(),
+          imageData: '', status: 'CAPTURING'
+        };
+      }
+      Object.assign(task, {
+        serverReady: true,
+        name: response.name || task.name || item.name || 'Karyawan',
+        activity: response.activity || task.activity || item.activity || '-',
+        time: response.time || task.time || '',
+        date: response.date || task.date || ''
+      });
+      await savePhotoTask(task);
+      const card = document.getElementById('photo-' + requestId);
+      if (card) {
+        const name = card.querySelector('.employee-name');
+        const meta = card.querySelector('.message-meta');
+        if (name) name.textContent = task.name;
+        if (meta) meta.textContent = task.activity + ' · ' + (task.time || '-') + ' · ' + (task.date || '-');
+      }
+      if (task.imageData) startBackgroundPhotoUpload(task.imageData, requestId, task.token);
     }
 
     async function processPhotoCaptureQueue() {
@@ -1245,28 +1332,38 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
       isPhotoCaptureRunning = true;
       try {
         while (photoCaptureTasks.length) {
-          // Beri kesempatan antrean QR berikutnya masuk lebih dahulu.
-          // Kamera depan baru dipakai setelah tidak ada scan baru selama 2,5 detik.
-          while (isProcessing || (Date.now() - lastScanTime < 2500)) {
-            await new Promise(resolve => setTimeout(resolve, 150));
-          }
           const task = photoCaptureTasks.shift();
           const response = task.response;
           const requestId = response.requestId;
           photoCameraBusy = true;
           try {
             if (scanner && scanner.isScanning) await scanner.stop();
+            updatePhotoState(requestId, 'Mengambil foto wajah...', '');
             const imageData = await captureFacePhoto();
-            const preview = document.createElement('img');
-            preview.src = imageData;
-            preview.alt = 'Foto absensi ' + (response.name || '');
-            task.queueItem.insertBefore(preview, task.queueItem.querySelector('.upload-state'));
-            updatePhotoState(requestId, 'Foto siap. Mengirim ke Google Drive...', '');
-            startBackgroundPhotoUpload(imageData, requestId, task.item.token);
-          } catch (photoError) {
+            const saved = (await getPhotoTasks()).find(x => x.requestId === requestId) || {};
+            saved.requestId = requestId;
+            saved.token = task.item.token;
+            saved.imageData = imageData;
+            saved.status = 'PHOTO_SAVED';
+            saved.lastError = '';
+            await savePhotoTask(saved);
+            showPhotoPreview(task.queueItem, imageData);
             updatePhotoState(requestId,
-              'Absensi sudah tercatat, tetapi foto gagal diambil: ' + (photoError.message || photoError),
+              saved.serverReady ? 'Foto tersimpan di tablet. Mengunggah ke Google Drive...' :
+                'Foto aman tersimpan di tablet. Menunggu konfirmasi absensi...',
+              '');
+            if (saved.serverReady) startBackgroundPhotoUpload(imageData, requestId, saved.token);
+          } catch (photoError) {
+            const saved = (await getPhotoTasks()).find(x => x.requestId === requestId) || {
+              requestId, token: task.item.token, createdAt: Date.now()
+            };
+            saved.status = 'FAILED';
+            saved.lastError = photoError.message || String(photoError);
+            await savePhotoTask(saved);
+            updatePhotoState(requestId,
+              '✕ Foto gagal diambil: ' + saved.lastError + ' — tekan Coba foto lagi.',
               'failed');
+            addPhotoRetryButton(requestId, 'capture');
             console.error('ERROR AMBIL FOTO:', photoError);
           } finally {
             photoCameraBusy = false;
@@ -1278,6 +1375,75 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
         }
       } finally {
         isPhotoCaptureRunning = false;
+      }
+    }
+
+    function addPhotoRetryButton(requestId, mode) {
+      const card = document.getElementById('photo-' + requestId);
+      if (!card || card.querySelector('.photo-retry')) return;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'queue-retry photo-retry';
+      button.textContent = mode === 'capture' ? 'Coba foto lagi' : 'Coba upload lagi';
+      button.addEventListener('click', () => retryPhotoTask(requestId, mode));
+      card.appendChild(button);
+    }
+
+    async function retryPhotoTask(requestId, mode) {
+      const tasks = await getPhotoTasks();
+      const task = tasks.find(x => x.requestId === requestId);
+      if (!task) return;
+      const card = document.getElementById('photo-' + requestId);
+      const button = card && card.querySelector('.photo-retry');
+      if (button) button.remove();
+      if (mode === 'capture' || !task.imageData) {
+        task.status = 'CAPTURING';
+        task.lastError = '';
+        await savePhotoTask(task);
+        if (!card) addPhotoQueueItem(task);
+        const queueItem = document.getElementById('photo-' + requestId);
+        photoCaptureTasks.push({ requestId, response: task, item: { token: task.token }, queueItem });
+        processPhotoCaptureQueue();
+      } else {
+        task.status = 'PHOTO_SAVED';
+        task.lastError = '';
+        await savePhotoTask(task);
+        startBackgroundPhotoUpload(task.imageData, requestId, task.token);
+      }
+    }
+
+    async function restorePhotoTasks() {
+      try {
+        const tasks = await getPhotoTasks();
+        for (const task of tasks) {
+          if (task.status === 'DONE' && Date.now() - Number(task.completedAt || 0) >= PHOTO_HISTORY_INTERVAL) {
+            await deletePhotoTask(task.requestId);
+            continue;
+          }
+          const existingCard = document.getElementById('photo-' + task.requestId);
+          const card = existingCard || addPhotoQueueItem(task);
+          if (task.imageData) showPhotoPreview(card, task.imageData);
+          if (task.status === 'DONE') {
+            updatePhotoState(task.requestId, '✓ Foto berhasil tersimpan di Google Drive.', 'done');
+          } else if (task.status === 'FAILED') {
+            updatePhotoState(task.requestId, '✕ ' + (task.lastError || 'Foto belum berhasil diproses.'), 'failed');
+            addPhotoRetryButton(task.requestId, task.imageData ? 'upload' : 'capture');
+          } else if (task.imageData && task.serverReady) {
+            updatePhotoState(task.requestId, 'Foto tersimpan di tablet. Melanjutkan upload...', '');
+            startBackgroundPhotoUpload(task.imageData, task.requestId, task.token);
+          } else if (task.imageData) {
+            updatePhotoState(task.requestId, 'Foto aman di tablet. Menunggu konfirmasi absensi...', '');
+          } else if (googleIdToken &&
+                     !photoCaptureTasks.some(x => x.requestId === task.requestId)) {
+            photoCaptureTasks.push({ requestId: task.requestId, response: task,
+              item: { token: task.token }, queueItem: card });
+          } else {
+            updatePhotoState(task.requestId, 'Menunggu login untuk mengambil foto...', '');
+          }
+        }
+        if (googleIdToken) processPhotoCaptureQueue();
+      } catch (error) {
+        console.warn('Gagal memulihkan antrean foto:', error);
       }
     }
 
@@ -1300,7 +1466,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           createdAt:item.createdAt, completedAt:Date.now(), status:'SUCCESS' });
         showAttendanceNotification('✓ ANTREAN BERHASIL',(response.name || 'Karyawan') + ' sudah tercatat di Spreadsheet.','success');
         playAttendanceSound('success');
-        enqueuePhotoCapture(response, item);
+        await markPhotoServerReady(response, item);
       } catch(error) {
         item.status = 'FAILED'; item.lastError = error.message || String(error); await savePendingAttendance(item);
         saveAttendanceHistory({ requestId, name:item.name || 'Belum terkonfirmasi', activity:item.activity || '-',
@@ -1334,7 +1500,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
             saveAttendanceHistory({ requestId:item.requestId, name:response.name || item.name,
               id:response.id || response.employeeId || '', activity:response.activity || item.activity, time:response.time || '',
               date:response.date || '', createdAt:item.createdAt, completedAt:Date.now(), status:'SUCCESS' });
-            enqueuePhotoCapture(response, item);
+            await markPhotoServerReady(response, item);
             playAttendanceSound('success');
             console.info('ABSENSI ANTREAN BERHASIL DISINKRONKAN:',item.requestId);
           } catch(error) {
@@ -1367,7 +1533,26 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
 
     window.addEventListener('online', () => {
       if (googleIdToken) syncPendingAttendanceQueue();
+      retryStoredPhotoUploads();
     });
+
+    async function retryStoredPhotoUploads() {
+      if (!navigator.onLine) return;
+      try {
+        const tasks = await getPhotoTasks();
+        tasks.forEach(task => {
+          if (task.status === 'FAILED' && task.imageData && task.serverReady) {
+            startBackgroundPhotoUpload(task.imageData, task.requestId, task.token);
+          }
+        });
+      } catch (error) {
+        console.warn('Gagal memeriksa ulang foto:', error);
+      }
+    }
+
+    setInterval(() => {
+      if (navigator.onLine) retryStoredPhotoUploads();
+    }, 30000);
 
     // =====================================
     // RESET SCANNER
@@ -1376,7 +1561,7 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
     async function resetScanner() {
       // Lepaskan kunci scan segera setelah kamera siap kembali.
       isProcessing = false;
-      if (!googleIdToken) return;
+      if (!googleIdToken || photoCameraBusy || isCapturingFace) return;
 
       try {
         if (!scanner || !scanner.isScanning) {
@@ -1485,6 +1670,8 @@ function startBackgroundPhotoUpload(imageData, requestId, token) {
           status: 'PENDING', name: 'Menunggu konfirmasi server', activity: '-'
         };
         await savePendingAttendance(queueItem);
+        await enqueuePhotoCapture({ requestId, name:'Menunggu konfirmasi server',
+          activity:'-', time:'', date:'' }, queueItem);
         saveAttendanceHistory({ requestId, name:'Menunggu konfirmasi server', activity:'-',
           scannedAt:new Date().toLocaleTimeString('id-ID'), createdAt:queueItem.createdAt, status:'PENDING' });
         renderAttendanceQueue();
